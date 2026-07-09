@@ -36,10 +36,10 @@ unsigned long nightDisarmTimer = 0;
 bool nightTimerActive = false;
 unsigned long lastTimeCheck = 0;
 
-// --- Audio Variables (Fixed Frequency PWM used exclusively for Volume Duty Cycle) ---
-int alarmVolume = 255; // Defaults to max volume unless adjusted by slider
+// --- Audio Variables ---
+int alarmVolume = 255; 
 int chimeVolume = 128;
-int chimeTrigger = 0;  // 0=Off, 1=Open, 2=Close
+int chimeTrigger = 0;  
 unsigned long audioTimer = 0;
 
 // --- UI Direct Feedback Beep ---
@@ -56,13 +56,13 @@ unsigned long previousWifiMillis = 0;
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
 
-// --- Minified Material 3 HTML/CSS (Google Sans, Expressive Palette, Added Time/WiFi Metrics) ---
+// --- Minified Material 3 HTML/CSS ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Security Core</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@500;700&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans',sans-serif;background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-family:'Google Sans';font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
-<div class="c"><h2>System Core</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div><div class="row"><span>System Time</span><span id="t" style="font-size:14px;color:#434940">--:--:--</span></div><div class="row"><span>Network</span><span id="w" class="bdg bn">--</span></div></div>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Door Alarm System Panel</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght=500;700&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans',sans-serif;background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-family:'Google Sans';font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
+<div class="c"><h2>Alarm System Panel</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div><div class="row"><span>System Time</span><span id="t" style="font-size:14px;color:#434940">--:--:--</span></div><div class="row"><span>Network</span><span id="w" class="bdg bn">--</span></div></div>
 <div class="g"><button class="b1" onclick="S('arm')">Arm</button><button class="b2" onclick="S('disarm')">Disarm</button><button class="b3 f" onclick="S('hush')">Hush Alarm</button></div><button class="b2" onclick="S('test')">Test Alarm</button>
 <div class="box"><span>Alarm Vol</span><input type="range" id="vA" min="0" max="255" onchange="V('vol_alarm',this.value)"><span>Chime Vol</span><input type="range" id="vC" min="0" max="255" onchange="V('vol_chime',this.value)"></div></div>
-<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':'bn');E('w',d.w,d.w==='ONLINE'?'bg':'br');document.getElementById('t').innerText=d.t;document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;})} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,500);window.onload=U;</script></body></html>
+<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':'bn');E('w',d.w,d.w==='ONLINE'?'bg':'br');document.getElementById('t').innerText=d.t;document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;}).catch(e=>console.error("Data Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,500);window.onload=U;</script></body></html>
 )rawliteral";
 
 // --- Helpers ---
@@ -98,9 +98,17 @@ void handleStatus() {
     sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
-  String json = "{\"d\":\"" + doorStr + "\",\"a\":\"" + alarmStr + "\",\"s\":\"" + armStr + 
-                "\",\"w\":\"" + wifiStr + "\",\"t\":\"" + String(timeBuf) + 
-                "\",\"va\":" + String(alarmVolume) + "\",\"vc\":" + String(chimeVolume) + "}";
+  // Fixed clean JSON construction to avoid string escaping issues
+  String json = "{";
+  json += "\"d\":\"" + doorStr + "\",";
+  json += "\"a\":\"" + alarmStr + "\",";
+  json += "\"s\":\"" + armStr + "\",";
+  json += "\"w\":\"" + wifiStr + "\",";
+  json += "\"t\":\"" + String(timeBuf) + "\",";
+  json += "\"va\":" + String(alarmVolume) + ",";
+  json += "\"vc\":" + String(chimeVolume);
+  json += "}";
+  
   server.send(200, "application/json", json);
 }
 
@@ -147,7 +155,6 @@ void setup() {
   isDoorOpen = (digitalRead(REED_PIN) == HIGH);
   lastDoorState = isDoorOpen;
 
-  // Set up a fixed frequency on the PWM channel to control volume purely through duty cycle modification
   ledcAttach(BUZZER_PIN, 2400, 8); 
 
   preferences.begin("security", false);
@@ -218,7 +225,7 @@ void loop() {
     lastDoorState = currentDoorState;
   }
 
-  // 4. Fixed Frequency Audio Processing Engine (Clean Volume Mapping & 150ms/50ms Cadence)
+  // 4. Audio Processing Engine
   if ((isAlarmTriggered && !isHushed) || isTestingAlarm) {
     if ((now % 200) < 150) setBuzzerVolume(alarmVolume);
     else setBuzzerVolume(0);
@@ -230,13 +237,13 @@ void loop() {
   }
   else if (chimeTrigger > 0) {
     unsigned long elapsed = now - audioTimer;
-    if (chimeTrigger == 1) { // OPEN CHIME (High-Low simulated pattern via volume gating)
+    if (chimeTrigger == 1) { 
       if (elapsed < 120) setBuzzerVolume(chimeVolume);
       else if (elapsed < 160) setBuzzerVolume(0);
       else if (elapsed < 280) setBuzzerVolume(chimeVolume / 2);
       else { setBuzzerVolume(0); chimeTrigger = 0; }
     }
-    else if (chimeTrigger == 2) { // CLOSE CHIME (High-High pattern)
+    else if (chimeTrigger == 2) { 
       if (elapsed < 120) setBuzzerVolume(chimeVolume);
       else if (elapsed < 180) setBuzzerVolume(0);
       else if (elapsed < 300) setBuzzerVolume(chimeVolume);
