@@ -21,13 +21,15 @@ WebServer server(80);
 Preferences preferences;
 
 // --- Core System Variables ---
-bool isArmed = false;          // Defaults to false, managed by NTP or user actions
+bool isArmed = false;          
 bool bootTimeSet = false;
 bool armPending = false;
 bool isAlarmTriggered = false; 
 bool isHushed = false;
 bool isTestingAlarm = false;
 bool isDoorOpen = false;
+bool lastDoorState = false; // Edge tracking variable
+bool ntpInitialized = false;
 
 // --- Night Mode (12 AM - 4 AM) Variables ---
 unsigned long nightDisarmTimer = 0;
@@ -38,17 +40,14 @@ unsigned long lastTimeCheck = 0;
 bool oneTimeOpenActive = false;
 bool oneTimeOpenUsed = false;
 unsigned long oneTimeTimer = 0;
-const unsigned long ONE_TIME_TIMEOUT = 15000; // Exact 15-second window
+const unsigned long ONE_TIME_TIMEOUT = 15000; 
 
 // --- Audio & PWM Variables ---
 int alarmVolume = 128; 
 int chimeVolume = 128;
 int currentPwmFreq = 0;
-int audioState = 0;
 int chimeTrigger = 0; // 0=Off, 1=Open, 2=Close
-
 unsigned long audioTimer = 0;
-unsigned long audioInterval = 0;
 
 // --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
@@ -112,7 +111,7 @@ void handleStatus() {
 
 void handleAction() {
   String cmd = server.arg("cmd");
-  triggerUiFeedback(); // Force audio feedback on every web UI call
+  triggerUiFeedback(); 
 
   if (cmd == "arm") {
     oneTimeOpenActive = false;
@@ -125,11 +124,11 @@ void handleAction() {
     nightDisarmTimer = millis(); nightTimerActive = true; 
   } 
   else if (cmd == "hush") {
-    isTestingAlarm = false; // Immediately drops manual test alarm
+    isTestingAlarm = false; 
     if (isAlarmTriggered) {
       isHushed = true;
     }
-    if (!isDoorOpen) { // If door is already closed, automatically resolve and rearm completely
+    if (!isDoorOpen) { 
       isAlarmTriggered = false;
       isHushed = false;
       isArmed = true;
@@ -160,15 +159,15 @@ void setup() {
   pinMode(ARMED_LED_PIN, OUTPUT);
   pinMode(DOOR_LED_PIN, OUTPUT);
   
-  // Initialize Preference Module (Persistence Engine)
+  isDoorOpen = (digitalRead(REED_PIN) == HIGH);
+  lastDoorState = isDoorOpen;
+
   preferences.begin("security", false);
   alarmVolume = preferences.getInt("vol_alarm", 128);
   chimeVolume = preferences.getInt("vol_chime", 128);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   if (MDNS.begin("dooralarm")) MDNS.addService("http", "tcp", 80);
 
@@ -182,22 +181,27 @@ void loop() {
   unsigned long now = millis();
   server.handleClient();
 
-  // 1. Connection Manager
+  // 1. Instant Connection Manager
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   if (!wifiConnected && (now - previousWifiMillis >= 10000)) {
-    WiFi.disconnect(); WiFi.begin(ssid, password);
+    WiFi.begin(ssid, password);
     previousWifiMillis = now;
   }
 
-  // 2. NTP Time Controls
-  if (now - lastTimeCheck > 10000) {
+  // Asynchronous Background NTP Initializer
+  if (wifiConnected && !ntpInitialized) {
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    ntpInitialized = true;
+  }
+
+  // 2. NTP Time Management Loop
+  if (ntpInitialized && (now - lastTimeCheck > 10000)) {
     lastTimeCheck = now;
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
       bool isNight = (timeinfo.tm_hour >= 0 && timeinfo.tm_hour < 4);
       if (!bootTimeSet) { isArmed = isNight; bootTimeSet = true; }
 
-      // 1-Hour Auto-Rearm Loop Protection
       if (isNight && !isArmed && nightTimerActive && !oneTimeOpenActive) {
         if (now - nightDisarmTimer >= 3600000) { 
           isArmed = true; nightTimerActive = false;
@@ -208,56 +212,79 @@ void loop() {
     }
   }
 
-  // 3. Sensor Tracking & Alarm Logic Engine
-  isDoorOpen = (digitalRead(REED_PIN) == HIGH);
+  // 3. Hardware Edge Detection Matrix
+  bool currentDoorState = (digitalRead(REED_PIN) == HIGH);
+  if (currentDoorState != lastDoorState) {
+    isDoorOpen = currentDoorState;
+    
+    // Play Chimes strictly when System is Disarmed & Safe
+    if (!isArmed && !isAlarmTriggered && !isTestingAlarm && !oneTimeOpenActive) {
+      chimeTrigger = isDoorOpen ? 1 : 2; // 1 = Open (High-Low), 2 = Close (High-High)
+      audioTimer = now;
+    }
 
-  // Auto-Arming Transition
-  if (armPending && !isDoorOpen) {
-    isArmed = true; armPending = false;
+    // Process State Changes on Door Closing Execution
+    if (!isDoorOpen) {
+      if (armPending) {
+        isArmed = true; armPending = false;
+      }
+      if (isAlarmTriggered && isHushed) {
+        isAlarmTriggered = false; isHushed = false; isArmed = true;
+      }
+      if (oneTimeOpenActive && oneTimeOpenUsed) {
+        isArmed = true; oneTimeOpenActive = false; oneTimeOpenUsed = false;
+      }
+    }
+
+    // Process Alarms on Breaking Sensor Circuit
+    if (isDoorOpen && isArmed && !oneTimeOpenActive) {
+      isAlarmTriggered = true; isHushed = false;
+    }
+
+    lastDoorState = currentDoorState;
   }
 
-  // Alarm Violation Checker
-  if (isArmed && isDoorOpen && !oneTimeOpenActive) {
-    isAlarmTriggered = true;
-  }
-
-  // Live Hush Auto-Rearm Resolution
-  if (isAlarmTriggered && isHushed && !isDoorOpen) {
-    isAlarmTriggered = false; isHushed = false; isArmed = true;
-  }
-
-  // One-Time Open State Machine Execution
+  // 4. One-Time Open Lifecycle Engine
   if (oneTimeOpenActive) {
     if (!oneTimeOpenUsed && isDoorOpen) {
       oneTimeOpenUsed = true; 
     }
-    // Condition A: Guest entered, door closed completely
-    if (oneTimeOpenUsed && !isDoorOpen) {
-      isArmed = true; oneTimeOpenActive = false; oneTimeOpenUsed = false;
-    }
-    // Condition B: Nobody opened the door within exactly 15 seconds
+    // Condition Protection: Auto-rearm if structural timeout expires before an opening occurs
     if (!oneTimeOpenUsed && (now - oneTimeTimer >= ONE_TIME_TIMEOUT)) {
       isArmed = true; oneTimeOpenActive = false;
     }
   }
 
-  // 4. Audio Delivery Priority Tree
+  // 5. Audio Processing Engine
   if ((isAlarmTriggered && !isHushed) || isTestingAlarm) {
-    // 150ms ON / 50ms OFF Pulse Configuration
+    // Exact 150ms ON / 50ms OFF Pulse Configuration
     if ((now % 200) < 150) setBuzzer(2200, alarmVolume);
     else setBuzzer(0, 0);
-    chimeTrigger = 0; uiBeepActive = false; // Drop low priority signals
+    chimeTrigger = 0; uiBeepActive = false; 
   } 
   else if (uiBeepActive) {
-    // Quick UI Feedback Tone
-    if (now - uiBeepTimer < 60) setBuzzer(1200, chimeVolume);
+    if (now - uiBeepTimer < 60) setBuzzer(1800, chimeVolume);
     else { setBuzzer(0, 0); uiBeepActive = false; }
   }
+  else if (chimeTrigger > 0) {
+    unsigned long elapsed = now - audioTimer;
+    if (chimeTrigger == 1) { // OPEN CHIME: High-Low Sound Pattern
+      if (elapsed < 120) setBuzzer(1600, chimeVolume);
+      else if (elapsed < 280) setBuzzer(900, chimeVolume);
+      else { setBuzzer(0, 0); chimeTrigger = 0; }
+    }
+    else if (chimeTrigger == 2) { // CLOSE CHIME: High-High Sound Pattern
+      if (elapsed < 120) setBuzzer(1600, chimeVolume);
+      else if (elapsed < 180) setBuzzer(0, 0);
+      else if (elapsed < 300) setBuzzer(1600, chimeVolume);
+      else { setBuzzer(0, 0); chimeTrigger = 0; }
+    }
+  }
   else {
-    setBuzzer(0, 0); // System Silent
+    setBuzzer(0, 0); 
   }
 
-  // 5. LED Drivers
+  // 6. LED Driving Modules
   setLedState(DOOR_LED_PIN, isDoorOpen ? AIRPLANE_BLINK : LED_ON);
 
   if (!wifiConnected) setLedState(ARMED_LED_PIN, RAPID_BLINK);
