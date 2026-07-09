@@ -1,75 +1,39 @@
-# ESP32 Smart Security Core
+# ESP32 Web-Controlled Door Security System
 
-[![Platform: ESP32](https://img.shields.io/badge/Platform-ESP32-1B5E20?style=flat-square&logo=espressif&logoColor=white)](https://www.espressif.com/)
-[![Framework: Arduino](https://img.shields.io/badge/Framework-Arduino-2E7D32?style=flat-square&logo=arduino&logoColor=white)](https://www.arduino.cc/)
-[![Language: C++](https://img.shields.io/badge/Language-C%2B%2B-388E3C?style=flat-square&logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
-![Protocol: HTTP / mDNS](https://img.shields.io/badge/Protocol-HTTP%20%2F%20mDNS-43A047?style=flat-square)
-![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-4CAF50?style=flat-square)
+![Platform: ESP32](https://img.shields.io/badge/Platform-ESP32-1B5E20)
+![Framework: Arduino](https://img.shields.io/badge/Framework-Arduino-2E7D32)
+![Language: C++](https://img.shields.io/badge/Language-C%2B%2B-388E3C)
+![Setup: DIY Friendly](https://img.shields.io/badge/Setup-DIY%20Friendly-4CAF50)
 
----
-
-An ultra-lightweight, high-performance physical security engine developed specifically for the ESP32 architecture using optimized asynchronous loop structures and zero-blocking delays.
+A simple, fast door security system built for the ESP32. It monitors a magnetic door sensor, hosts a local web interface with live updates, and triggers a buzzer with distinct chimes and alarm patterns without slowing down the core loop.
 
 ---
 
-## System Architecture
-+------------------------+      +-------------------+      +-----------------------+
-|  Magnetic Reed Sensor  | ---> |   ESP32 Core      | ---> |  Active Piezo Buzzer  |
-|  (GPIO 13 / Pullup)    |      |   State Engine    |      |  (GPIO 25 / PWM)      |
-+------------------------+      +-------------------+      +-----------------------+
-|
-v
-+---------------------+
-|   Material 3 UI     |
-|   (500ms Polling)   |
-+---------------------+
-### Technical Profile
-* **Hardware Core**: Espressif Systems ESP32 NodeMCU
-* **Audio Pipeline**: Non-blocking hardware LEDC PWM Generator
-* **State Matrix**: Synchronized Atomic Core Loops with dynamic NTP time tracking
-* **User Interface**: Minified Material 3 Dashboard with async AJAX data polling
+## Features
+
+* Live Web UI: Responsive control dashboard that refreshes every 500ms for accurate real-time door status.
+* Smart Hush: Instantly silences the alarm. If the door is already closed, it clears the alert and re-arms immediately.
+* Custom Chimes: Non-blocking High-Low sound pattern when opened, and a High-High pattern when closed.
+* Alarm Cadence: Fast 150ms ON / 50ms OFF buzzer pattern when the alarm is triggered or tested.
+* Memory Persistence: Saves your alarm and chime volume settings to flash memory so they stay the same after a reboot.
+* Night Mode: Automatically arms itself between 12:00 AM and 4:00 AM. If you manually disarm it during these hours, it waits 1 hour before auto-arming again.
 
 ---
 
-## Core Features
+## Pinout Mapping
 
-### Night Mode Guarding Matrix
-The core system implements an atomic background time fence. It shifts states dynamically without locking the processor:
-* **Auto-Arm Range**: Active enforcement between 12:00 AM and 4:00 AM.
-* **Dynamic Defeat Protection**: If a user manual Disarm occurs inside this timeframe, a persistent loop triggers to auto-rearm the architecture exactly 1 hour later.
-
-### Advanced Non-Blocking Audio Framework
-Traditional delays freeze system processing. This framework monitors loop tick-counts natively to multiplex audio alerts and chimes seamlessly:
-* **Fire Alarm Alert**: Pulses an authoritative high-decibel frequency on an exact 150ms ON / 50ms OFF pattern during breach states or manual hardware diagnostics.
-* **Door Open Chime**: Fires a descending High-Low frequency wave instantly when the reed layout breaks circuit.
-* **Door Close Chime**: Fires an abrupt High-High sequence the precise microsecond the circuit closes.
-
-### Persistent Memory Engine
-Utilizes the onboard ESP32 non-volatile Flash layout (`Preferences.h`). Audio and system properties remain safely indexed during system reboots or unannounced power failures.
-
----
-
-## Pin Configuration Mapping
-
-| Component | Target ESP32 Pin | Interface Type | Standard Status |
+| Component | ESP32 Pin | Type | Default State |
 | :--- | :--- | :--- | :--- |
-| **Magnetic Reed Sensor** | GPIO 13 | Digital Input (Internal Pullup) | High = Open / Low = Closed |
-| **Active Sound Buzzer** | GPIO 25 | LEDC PWM Engine Profile | Variable Duty Cycle Resolution |
-| **Armed Status LED** | GPIO 26 | Digital Output Driver | Multiple Blink Profiles |
-| **Door Sensor Status LED** | GPIO 27 | Digital Output Driver | Structural Indicator |
+| Magnetic Reed Switch | GPIO 13 | Input (Internal Pullup) | High = Open / Low = Closed |
+| Active Buzzer | GPIO 25 | Output (LEDC PWM) | Frequency & Volume Modulated |
+| Armed Status LED | GPIO 26 | Output | System State Indicator |
+| Door Status LED | GPIO 27 | Output | Hardware Reed Copy Indicator |
 
 ---
 
-## UI Integration Details
+## Quick Setup
 
-The web server delivers an embedded, minified interface optimized to reduce transmission size down to individual bytes. The layout features an expanded full-width "Hush Alarm" interface that scales gracefully to fit mobile and desktop viewports.
-
-```javascript
-// High-efficiency asynchronous query loop
-setInterval(function UpdateUI() {
-  fetch('/st')
-    .then(response => response.json())
-    .then(data => {
-      // High-frequency UI status rendering engine updates at 500ms
-    });
-}, 500);
+1. Open the code in the Arduino IDE and select your board as **ESP32 Dev Module**.
+2. Change the `ssid` and `password` variables to match your local network.
+3. Flash the code to your ESP32.
+4. Open a browser and type `http://dooralarm.local` or the ESP32's IP address to access the dashboard.
