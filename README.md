@@ -3,7 +3,7 @@
 ![Platform: ESP32](https://img.shields.io/badge/Platform-ESP32-1B5E20)
 ![Framework: Arduino](https://img.shields.io/badge/Framework-Arduino-2E7D32)
 ![Language: C++](https://img.shields.io/badge/Language-C%2B%2B-388E3C)
-![Setup: DIY Friendly](https://img.shields.io/badge/Setup-DIY%20Friendly-4CAF50)
+![Setup: DIY Friendly](https://img.shields.io/badge/DIY%20Friendly-4CAF50)
 
 A simple, fast door security system built for the ESP32. It monitors a magnetic door sensor, hosts a local web interface with live updates, and triggers a buzzer with distinct chimes and alarm patterns without slowing down the core loop.
 
@@ -11,7 +11,7 @@ A simple, fast door security system built for the ESP32. It monitors a magnetic 
 
 ## Features
 
-* Live Web UI: Responsive control dashboard that refreshes every 500ms for accurate real-time door status.
+* Live Web UI: Responsive dashboard featuring a 500ms polling rate for real-time door status. Styled using Google Sans typography and Material 3 expressive design rules and colors.
 * Smart Hush: Instantly silences the alarm. If the door is already closed, it clears the alert and re-arms immediately.
 * Custom Chimes: Non-blocking High-Low sound pattern when opened, and a High-High pattern when closed.
 * Alarm Cadence: Fast 150ms ON / 50ms OFF buzzer pattern when the alarm is triggered or tested.
