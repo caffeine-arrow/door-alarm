@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include "time.h"
 
 // --- Hardware Pins ---
 const int REED_PIN = 13;
@@ -8,317 +9,116 @@ const int BUZZER_PIN = 25;
 const int ARMED_LED_PIN = 26;
 const int DOOR_LED_PIN = 27;
 
-// --- WiFi Credentials ---
+// --- WiFi & Time Credentials ---
 const char* ssid = "IoT-Net";
 const char* password = "IoT@26/P12";
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 7 * 3600; // +7 Timezone
+const int   daylightOffset_sec = 0;
 
-// --- Web Server Instance ---
 WebServer server(80);
 
-// --- System State Variables ---
-bool isArmed = true;           // Active fully armed state
-bool armPending = false;       // Waiting for door to close before arming
+// --- Core System Variables ---
+bool isArmed = false;          // Defaults to false, overridden by time sync
+bool bootTimeSet = false;
+bool armPending = false;
 bool isAlarmTriggered = false; 
-bool isHushed = false;         // Silences buzzer until door closes
+bool isHushed = false;
 bool isTestingAlarm = false;
 bool isDoorOpen = false;
+bool prevDoorState = false;
 
-// --- One-Time Open Feature Variables ---
+// --- Night Mode (12 AM - 4 AM) Variables ---
+unsigned long nightDisarmTimer = 0;
+bool nightTimerActive = false;
+unsigned long lastTimeCheck = 0;
+
+// --- One-Time Open Variables ---
 bool oneTimeOpenActive = false;
 bool oneTimeOpenUsed = false;
-unsigned long oneTimeOpenTimer = 0;
-const unsigned long ONE_TIME_TIMEOUT = 15000; // 15 seconds
+unsigned long oneTimeTimer = 0;
+const unsigned long ONE_TIME_TIMEOUT = 15000;
 
-// --- Volume Sliders (PWM Duty Cycle: 0 to 255) ---
+// --- Audio & PWM Variables ---
 int alarmVolume = 128; 
-int chimeVolume = 128; // Reserved for future chime logic
+int chimeVolume = 128;
+int currentPwmFreq = 0;
+int audioState = 0;
+int chimeTrigger = 0; // 0=Off, 1=Open, 2=Close
+unsigned long audioTimer = 0;
+unsigned long audioInterval = 0;
 
-// --- WiFi Reconnect Variables ---
+// --- WiFi Reconnect ---
 unsigned long previousWifiMillis = 0;
-const long wifiInterval = 10000;
 
-// --- LED Pattern Enums ---
+// --- LED Constants ---
 #define LED_OFF 0
 #define LED_ON 1
 #define AIRPLANE_BLINK 2
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
 
-// --- HTML Layout with Material 3 Expressive UI ---
+// --- Minified Material 3 HTML/CSS (Loads instantly) ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smart Security Core</title>
-    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --md-primary: #2b6a41;
-            --md-on-primary: #ffffff;
-            --md-primary-container: #d2e7d6;
-            --md-on-primary-container: #0f2013;
-            --md-surface: #f7fbf3;
-            --md-surface-variant: #e1e9dc;
-            --md-on-surface: #191c18;
-            --md-outline: #727970;
-            --md-error: #ba1a1a;
-            --md-error-container: #ffdad6;
-        }
-        body {
-            font-family: 'Google Sans', sans-serif;
-            background-color: var(--md-surface);
-            color: var(--md-on-surface);
-            margin: 0;
-            padding: 16px;
-            display: flex;
-            justify-content: center;
-        }
-        .container {
-            width: 100%;
-            max-width: 480px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
-        .header {
-            text-align: center;
-            font-weight: 700;
-            font-size: 24px;
-            color: var(--md-primary);
-            margin: 8px 0;
-        }
-        .info-box {
-            background-color: var(--md-surface-variant);
-            border-radius: 28px;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .status-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 16px;
-            font-weight: 500;
-        }
-        .badge {
-            padding: 6px 16px;
-            border-radius: 100px;
-            font-weight: 700;
-            font-size: 14px;
-            text-transform: uppercase;
-        }
-        .badge-green { background-color: var(--md-primary-container); color: var(--md-on-primary-container); }
-        .badge-red { background-color: var(--md-error-container); color: var(--md-error); }
-        .badge-neutral { background-color: #e0e0e0; color: #424242; }
-        .grid-buttons {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-        .btn {
-            font-family: 'Google Sans', sans-serif;
-            font-weight: 500;
-            font-size: 15px;
-            padding: 14px;
-            border: none;
-            border-radius: 20px;
-            cursor: pointer;
-            transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .btn:active { transform: scale(0.94); }
-        .btn-primary { background-color: var(--md-primary); color: var(--md-on-primary); }
-        .btn-tonal { background-color: var(--md-primary-container); color: var(--md-on-primary-container); }
-        .btn-outline { background-color: transparent; border: 1px solid var(--md-outline); color: var(--md-primary); }
-        .slider-box {
-            background-color: var(--md-surface-variant);
-            border-radius: 24px;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .slider-label { font-weight: 500; font-size: 14px; }
-        input[type="range"] {
-            -webkit-appearance: none;
-            width: 100%;
-            height: 8px;
-            border-radius: 4px;
-            background: var(--md-outline);
-            outline: none;
-        }
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background: var(--md-primary);
-            cursor: pointer;
-            transition: transform 0.1s;
-        }
-        input[type="range"]::-webkit-slider-thumb:active { transform: scale(1.3); }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">System Core Panel</div>
-        
-        <!-- Info Box Top -->
-        <div class="info-box">
-            <div class="status-row">
-                <span>Door Position</span>
-                <span id="doorState" class="badge badge-neutral">Loading...</span>
-            </div>
-            <div class="status-row">
-                <span>System Alarm Status</span>
-                <span id="alarmState" class="badge badge-neutral">Loading...</span>
-            </div>
-            <div class="status-row">
-                <span>Arming Context</span>
-                <span id="armContext" class="badge badge-neutral">Loading...</span>
-            </div>
-        </div>
-
-        <!-- Action Control Grid -->
-        <div class="grid-buttons">
-            <button class="btn btn-primary" onclick="sendAction('arm')">Arm System</button>
-            <button class="btn btn-outline" onclick="sendAction('disarm')">Disarm</button>
-            <button class="btn btn-tonal" onclick="sendAction('hush')">Hush Alarm</button>
-            <button class="btn btn-tonal" onclick="sendAction('onetime')">One-Time Open</button>
-        </div>
-        <button class="btn btn-outline" style="width:100%" onclick="sendAction('test')">Toggle Test Alarm</button>
-
-        <!-- Dynamic Control Sliders -->
-        <div class="slider-box">
-            <div class="slider-label">Alarm Sound Volume</div>
-            <input type="range" id="alarmVol" min="0" max="255" onchange="sendSlider('vol_alarm', this.value)">
-        </div>
-        <div class="slider-box">
-            <div class="slider-label">Chime Feed Volume</div>
-            <input type="range" id="chimeVol" min="0" max="255" onchange="sendSlider('vol_chime', this.value)">
-        </div>
-    </div>
-
-    <script>
-        function updateStatus() {
-            fetch('/status')
-                .then(res => res.json())
-                .then(data => {
-                    const door = document.getElementById('doorState');
-                    door.innerText = data.door;
-                    door.className = 'badge ' + (data.door === 'OPEN' ? 'badge-red' : 'badge-green');
-
-                    const alarm = document.getElementById('alarmState');
-                    alarm.innerText = data.alarm;
-                    alarm.className = 'badge ' + (data.alarm === 'ALARMING' ? 'badge-red' : 'badge-green');
-
-                    const context = document.getElementById('armContext');
-                    context.innerText = data.armState;
-                    context.className = 'badge ' + (data.armState === 'ARMED' ? 'badge-green' : (data.armState === 'PENDING' ? 'badge-neutral' : 'badge-neutral'));
-                    
-                    document.getElementById('alarmVol').value = data.vAlarm;
-                    document.getElementById('chimeVol').value = data.vChime;
-                });
-        }
-
-        function sendAction(cmd) {
-            fetch('/action?cmd=' + cmd);
-            setTimeout(updateStatus, 150);
-        }
-
-        function sendSlider(cmd, val) {
-            fetch(`/action?cmd=${cmd}&val=${val}`);
-        }
-
-        setInterval(updateStatus, 2000);
-        window.onload = updateStatus;
-    </script>
-</body>
-</html>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Security Core</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@500;700&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans',sans-serif;background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-family:'Google Sans';font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
+<div class="c"><h2>System Core</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div></div>
+<div class="g"><button class="b1" onclick="S('arm')">Arm</button><button class="b2" onclick="S('disarm')">Disarm</button><button class="b3" onclick="S('hush')">Hush</button><button class="b3" onclick="S('onetime')">One-Time</button></div>
+<button class="b2" onclick="S('test')">Test Alarm</button>
+<div class="box"><span>Alarm Vol</span><input type="range" id="vA" min="0" max="255" onchange="V('vol_alarm',this.value)"><span>Chime Vol</span><input type="range" id="vC" min="0" max="255" onchange="V('vol_chime',this.value)"></div></div>
+<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':'bn');document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;})} function S(c){fetch('/ac?cmd='+c);setTimeout(U,150)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,2000);window.onload=U;</script></body></html>
 )rawliteral";
 
-// --- Universal LED Controller Switch ---
+// --- Helpers ---
 void setLedState(int pin, int pattern) {
-  if (pattern == LED_OFF) {
-    digitalWrite(pin, LOW);
-  } 
-  else if (pattern == LED_ON) {
-    digitalWrite(pin, HIGH);
-  } 
-  else if (pattern == AIRPLANE_BLINK) {
-    digitalWrite(pin, (millis() % 1050) < 50 ? HIGH : LOW);
-  } 
-  else if (pattern == RAPID_BLINK) {
-    digitalWrite(pin, (millis() / 150) % 2 ? HIGH : LOW);
-  } 
-  else if (pattern == SLOW_BLINK) {
-    digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
-  }
+  if (pattern == LED_OFF) digitalWrite(pin, LOW);
+  else if (pattern == LED_ON) digitalWrite(pin, HIGH);
+  else if (pattern == AIRPLANE_BLINK) digitalWrite(pin, (millis() % 1050) < 50 ? HIGH : LOW);
+  else if (pattern == RAPID_BLINK) digitalWrite(pin, (millis() / 150) % 2 ? HIGH : LOW);
+  else if (pattern == SLOW_BLINK) digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
 }
 
-// --- Web Server Endpoints ---
-void handleRoot() {
-  server.send_P(200, "text/html", INDEX_HTML);
+void setBuzzer(int freq, int vol) {
+  if (freq != currentPwmFreq && vol > 0) {
+    ledcAttach(BUZZER_PIN, freq, 8);
+    currentPwmFreq = freq;
+  }
+  ledcWrite(BUZZER_PIN, vol);
 }
+
+// --- Web Endpoints ---
+void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 void handleStatus() {
-  String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
-  String alarmStr = (isAlarmTriggered && !isHushed) ? "ALARMING" : (isTestingAlarm ? "TESTING" : "OK");
-  String armStr = armPending ? "PENDING" : (isArmed ? "ARMED" : "DISARMED");
-  
-  String json = "{\"door\":\"" + doorStr + "\",\"alarm\":\"" + alarmStr + "\",\"armState\":\"" + armStr + "\",\"vAlarm\":" + String(alarmVolume) + ",\"vChime\":" + String(chimeVolume) + "}";
+  String json = "{\"d\":\"" + String(isDoorOpen ? "OPEN" : "CLOSED") + 
+                "\",\"a\":\"" + String((isAlarmTriggered && !isHushed) ? "ALARM" : (isTestingAlarm ? "TEST" : "OK")) + 
+                "\",\"s\":\"" + String(armPending ? "PENDING" : (isArmed ? "ARMED" : "DISARMED")) + 
+                "\",\"va\":" + String(alarmVolume) + ",\"vc\":" + String(chimeVolume) + "}";
   server.send(200, "application/json", json);
 }
 
 void handleAction() {
   String cmd = server.arg("cmd");
-  
   if (cmd == "arm") {
-    if (isDoorOpen) {
-      armPending = true;
-      isArmed = false;
-    } else {
-      isArmed = true;
-      armPending = false;
-    }
+    if (isDoorOpen) { armPending = true; isArmed = false; } 
+    else { isArmed = true; armPending = false; }
+    oneTimeOpenActive = false;
   } 
   else if (cmd == "disarm") {
-    isArmed = false;
-    armPending = false;
-    isAlarmTriggered = false;
-    isHushed = false;
-    oneTimeOpenActive = false;
-    oneTimeOpenUsed = false;
-    isTestingAlarm = false;
+    isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false;
+    oneTimeOpenActive = false; isTestingAlarm = false;
+    nightDisarmTimer = millis(); nightTimerActive = true; // Trigger 1hr night timer
   } 
   else if (cmd == "hush") {
-    if (isAlarmTriggered) {
-      isHushed = true;
-    }
+    if (isAlarmTriggered) isHushed = true;
   } 
   else if (cmd == "onetime") {
-    oneTimeOpenActive = true;
-    oneTimeOpenUsed = false;
-    oneTimeOpenTimer = millis();
-    isArmed = false;
-    armPending = false;
+    isArmed = false; armPending = false; isAlarmTriggered = false;
+    oneTimeOpenActive = true; oneTimeOpenUsed = false; oneTimeTimer = millis();
   } 
-  else if (cmd == "test") {
-    isTestingAlarm = !isTestingAlarm;
-  } 
-  else if (cmd == "vol_alarm") {
-    alarmVolume = server.arg("val").toInt();
-  } 
-  else if (cmd == "vol_chime") {
-    chimeVolume = server.arg("val").toInt();
-  }
+  else if (cmd == "test") isTestingAlarm = !isTestingAlarm;
+  else if (cmd == "vol_alarm") alarmVolume = server.arg("val").toInt();
+  else if (cmd == "vol_chime") chimeVolume = server.arg("val").toInt();
+  
   server.send(200, "text/plain", "OK");
 }
 
@@ -327,101 +127,133 @@ void setup() {
   pinMode(ARMED_LED_PIN, OUTPUT);
   pinMode(DOOR_LED_PIN, OUTPUT);
   
-  // Set up safe hardware PWM for the IRLZ44N driving the buzzer
-  ledcAttach(BUZZER_PIN, 2000, 8); // 2kHz Frequency, 8-bit resolution
-
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+  
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
-  // Set up local domain endpoint
-  if (MDNS.begin("dooralarm")) {
-    MDNS.addService("http", "tcp", 80);
-  }
+  if (MDNS.begin("dooralarm")) MDNS.addService("http", "tcp", 80);
 
   server.on("/", handleRoot);
-  server.on("/status", handleStatus);
-  server.on("/action", handleAction);
+  server.on("/st", handleStatus);
+  server.on("/ac", handleAction);
   server.begin();
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
   server.handleClient();
 
-  // --- 1. Core Hardware Status ---
-  isDoorOpen = (digitalRead(REED_PIN) == HIGH);
+  // 1. Connection Manager
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-
-  // --- 2. Non-Blocking Connection Guard ---
-  if (!wifiConnected && (currentMillis - previousWifiMillis >= wifiInterval)) {
-    WiFi.disconnect();
-    WiFi.begin(ssid, password);
-    previousWifiMillis = currentMillis;
+  if (!wifiConnected && (now - previousWifiMillis >= 10000)) {
+    WiFi.disconnect(); WiFi.begin(ssid, password);
+    previousWifiMillis = now;
   }
 
-  // --- 3. Smart Automation Logic Matrix ---
-  
-  // Automatic arming handler once door closes
-  if (armPending && !isDoorOpen) {
-    isArmed = true;
-    armPending = false;
+  // 2. NTP & Time Based Logic (Checked every 10 seconds)
+  if (now - lastTimeCheck > 10000) {
+    lastTimeCheck = now;
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) { // 0 timeout to prevent blocking
+      bool isNight = (timeinfo.tm_hour >= 0 && timeinfo.tm_hour < 4);
+      
+      // Boot State Definition
+      if (!bootTimeSet) {
+        isArmed = isNight; 
+        bootTimeSet = true;
+      }
+
+      // Auto-Rearm 1 Hour Logic during 12am-4am
+      if (isNight && !isArmed && nightTimerActive) {
+        if (now - nightDisarmTimer >= 3600000) { // 1 Hour
+          isArmed = true;
+          nightTimerActive = false;
+        }
+      } else if (!isNight) {
+        nightTimerActive = false; // Reset if outside window
+      }
+    }
   }
 
-  // Alarm Trigger Event
-  if (isArmed && isDoorOpen && !oneTimeOpenActive) {
-    isAlarmTriggered = true;
+  // 3. Edge-Detected Door Logic
+  bool currentDoor = (digitalRead(REED_PIN) == HIGH);
+  if (currentDoor != isDoorOpen) {
+    isDoorOpen = currentDoor;
+    
+    // Auto-Arming when door closes
+    if (armPending && !isDoorOpen) {
+      isArmed = true; armPending = false;
+    }
+
+    // Alarm Trigger (Strict Edge Detection)
+    if (isArmed && isDoorOpen && !oneTimeOpenActive) {
+      isAlarmTriggered = true; isHushed = false;
+    }
+
+    // Hush Auto-Rearm Feature
+    if (isAlarmTriggered && isHushed && !isDoorOpen) {
+      isAlarmTriggered = false; isHushed = false; isArmed = true;
+    }
+
+    // Disarmed Door Chime Triggers
+    if (!isArmed && !isAlarmTriggered && !oneTimeOpenActive) {
+      chimeTrigger = isDoorOpen ? 1 : 2; // 1 = Open, 2 = Close
+      audioState = 1; audioTimer = now; audioInterval = 0;
+    }
   }
 
-  // Hush Auto-Rearm Reset
-  if (isAlarmTriggered && isHushed && !isDoorOpen) {
-    isAlarmTriggered = false;
-    isHushed = false;
-    isArmed = true; 
-  }
-
-  // One-Time Open Lifecycle Handler
+  // 4. One-Time Open Logic Lifecycle
   if (oneTimeOpenActive) {
     if (!oneTimeOpenUsed && isDoorOpen) {
-      oneTimeOpenUsed = true;
+      oneTimeOpenUsed = true; // Registered opening
     }
-    // Scenario A: Door cycled completely -> Close & Auto-rearm
+    // Condition A: Fully cycled
     if (oneTimeOpenUsed && !isDoorOpen) {
-      isArmed = true;
-      oneTimeOpenActive = false;
-      oneTimeOpenUsed = false;
+      isArmed = true; oneTimeOpenActive = false;
     }
-    // Scenario B: Timeout protection -> Auto-rearm back if never opened
-    if (!oneTimeOpenUsed && (currentMillis - oneTimeOpenTimer >= ONE_TIME_TIMEOUT)) {
-      isArmed = true;
-      oneTimeOpenActive = false;
+    // Condition B: 15 Sec Timeout
+    if (!oneTimeOpenUsed && (now - oneTimeTimer >= ONE_TIME_TIMEOUT)) {
+      isArmed = true; oneTimeOpenActive = false;
     }
   }
 
-  // --- 4. Buzzer Switching Output ---
+  // 5. Advanced Audio Engine (Non-Blocking)
   if ((isAlarmTriggered && !isHushed) || isTestingAlarm) {
-    ledcWrite(BUZZER_PIN, alarmVolume);
-  } else {
-    ledcWrite(BUZZER_PIN, 0);
-  }
-
-  // --- 5. Door Status LED Driving ---
-  if (isDoorOpen) {
-    setLedState(DOOR_LED_PIN, AIRPLANE_BLINK);
-  } else {
-    setLedState(DOOR_LED_PIN, LED_ON);
-  }
-
-  // --- 6. Arm/Status LED Priority Ladder ---
-  if (!wifiConnected) {
-    setLedState(ARMED_LED_PIN, RAPID_BLINK);   // P1: Connection drops override everything
+    // Fire Alarm Sound (Alternates 800Hz and 1200Hz every 400ms)
+    if ((now / 400) % 2 == 0) setBuzzer(800, alarmVolume);
+    else setBuzzer(1200, alarmVolume);
+    chimeTrigger = 0; // Cancel chimes if alarming
   } 
-  else if (isAlarmTriggered) {
-    setLedState(ARMED_LED_PIN, SLOW_BLINK);    // P2: Active sounding alarm state
-  } 
-  else if (isArmed) {
-    setLedState(ARMED_LED_PIN, LED_ON);        // P3: System is locked down
+  else if (chimeTrigger > 0) {
+    // Chime Sound Machine
+    if (now - audioTimer >= audioInterval) {
+      audioState++;
+      audioTimer = now;
+      
+      if (chimeTrigger == 1) { // OPEN CHIME: Low-High
+        if (audioState == 2) { setBuzzer(400, chimeVolume); audioInterval = 100; }
+        else if (audioState == 3) { setBuzzer(0, 0); audioInterval = 50; }
+        else if (audioState == 4) { setBuzzer(800, chimeVolume); audioInterval = 150; }
+        else { setBuzzer(0, 0); chimeTrigger = 0; }
+      } 
+      else if (chimeTrigger == 2) { // CLOSE CHIME: High-High
+        if (audioState == 2) { setBuzzer(800, chimeVolume); audioInterval = 100; }
+        else if (audioState == 3) { setBuzzer(0, 0); audioInterval = 50; }
+        else if (audioState == 4) { setBuzzer(800, chimeVolume); audioInterval = 150; }
+        else { setBuzzer(0, 0); chimeTrigger = 0; }
+      }
+    }
   } 
   else {
-    setLedState(ARMED_LED_PIN, AIRPLANE_BLINK); // P4: System is safe/disarmed/pending
+    setBuzzer(0, 0); // Silence
   }
+
+  // 6. LED Drivers
+  setLedState(DOOR_LED_PIN, isDoorOpen ? AIRPLANE_BLINK : LED_ON);
+
+  if (!wifiConnected) setLedState(ARMED_LED_PIN, RAPID_BLINK);
+  else if (isAlarmTriggered) setLedState(ARMED_LED_PIN, SLOW_BLINK);
+  else if (isArmed) setLedState(ARMED_LED_PIN, LED_ON);
+  else setLedState(ARMED_LED_PIN, AIRPLANE_BLINK);
 }
