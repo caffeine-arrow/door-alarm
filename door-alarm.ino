@@ -31,7 +31,7 @@ bool isDoorOpen = false;
 bool lastDoorState = false; 
 bool ntpInitialized = false;
 
-// --- Night Mode (12 AM - 4 AM) Variables ---
+// --- Schedule Variables (Now starts at 9:30 PM / 21:30) ---
 unsigned long nightDisarmTimer = 0;
 bool nightTimerActive = false;
 unsigned long lastTimeCheck = 0;
@@ -56,13 +56,13 @@ unsigned long previousWifiMillis = 0;
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
 
-// --- Minified Material 3 HTML/CSS ---
+// --- Minified Material 3 HTML/CSS (Forced Universal Google Sans) ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Door Alarm System Panel</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght=500;700&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans',sans-serif;background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-family:'Google Sans';font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Door Alarm System Panel</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght=500;700&display=swap" rel="stylesheet"><style>*{font-family:'Google Sans',sans-serif !important} body{background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
 <div class="c"><h2>Alarm System Panel</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div><div class="row"><span>System Time</span><span id="t" style="font-size:14px;color:#434940">--:--:--</span></div><div class="row"><span>Network</span><span id="w" class="bdg bn">--</span></div></div>
 <div class="g"><button class="b1" onclick="S('arm')">Arm</button><button class="b2" onclick="S('disarm')">Disarm</button><button class="b3 f" onclick="S('hush')">Hush Alarm</button></div><button class="b2" onclick="S('test')">Test Alarm</button>
 <div class="box"><span>Alarm Vol</span><input type="range" id="vA" min="0" max="255" onchange="V('vol_alarm',this.value)"><span>Chime Vol</span><input type="range" id="vC" min="0" max="255" onchange="V('vol_chime',this.value)"></div></div>
-<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':'bn');E('w',d.w,d.w==='ONLINE'?'bg':'br');document.getElementById('t').innerText=d.t;document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;}).catch(e=>console.error("Data Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,500);window.onload=U;</script></body></html>
+<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':(d.s==='PENDING'?'br':'bn'));E('w',d.w,d.w==='ONLINE'?'bg':'br');document.getElementById('t').innerText=d.t;document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;}).catch(e=>console.error("Data Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,500);window.onload=U;</script></body></html>
 )rawliteral";
 
 // --- Helpers ---
@@ -98,7 +98,6 @@ void handleStatus() {
     sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
-  // Fixed clean JSON construction to avoid string escaping issues
   String json = "{";
   json += "\"d\":\"" + doorStr + "\",";
   json += "\"a\":\"" + alarmStr + "\",";
@@ -188,17 +187,33 @@ void loop() {
     ntpInitialized = true;
   }
 
-  // 2. Night Mode Management Loop
-  if (ntpInitialized && (now - lastTimeCheck > 10000)) {
+  // 2. Schedule Evaluation Engine (9:30 PM [21:30] to 4:00 AM)
+  if (ntpInitialized && (now - lastTimeCheck > 5000)) { // Checked every 5 seconds for snappier debugging
     lastTimeCheck = now;
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
-      bool isNight = (timeinfo.tm_hour >= 0 && timeinfo.tm_hour < 4);
-      if (!bootTimeSet) { isArmed = isNight; bootTimeSet = true; }
+      
+      // Determine if current time falls within 9:30 PM - 3:59 AM execution window
+      bool isNight = false;
+      if (timeinfo.tm_hour > 21 || timeinfo.tm_hour < 4) {
+        isNight = true;
+      } else if (timeinfo.tm_hour == 21 && timeinfo.tm_min >= 30) {
+        isNight = true;
+      }
 
-      if (isNight && !isArmed && nightTimerActive) {
-        if (now - nightDisarmTimer >= 3600000) { 
-          isArmed = true; nightTimerActive = false;
+      if (!bootTimeSet) { 
+        if (isNight) {
+          if (isDoorOpen) armPending = true;
+          else isArmed = true;
+        }
+        bootTimeSet = true; 
+      }
+
+      if (isNight && !isArmed && !armPending && nightTimerActive) {
+        if (now - nightDisarmTimer >= 3600000) { // 1-hour bypass window rules
+          if (isDoorOpen) armPending = true;
+          else isArmed = true;
+          nightTimerActive = false;
         }
       } else if (!isNight) {
         nightTimerActive = false; 
@@ -221,7 +236,12 @@ void loop() {
       if (isAlarmTriggered && isHushed) { isAlarmTriggered = false; isHushed = false; isArmed = true; }
     }
 
-    if (isDoorOpen && isArmed) { isAlarmTriggered = true; isHushed = false; }
+    if (isDoorOpen && (isArmed || armPending)) { 
+      isAlarmTriggered = true; 
+      isHushed = false; 
+      isArmed = false; 
+      armPending = false; 
+    }
     lastDoorState = currentDoorState;
   }
 
