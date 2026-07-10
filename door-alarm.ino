@@ -133,7 +133,7 @@ void sendAlert(String action) {
 }
 
 // ====================================================================
-// CORE 0 TASK: Telegram Task (Fixed Command Parsing)
+// CORE 0 TASK: Telegram Task (Improved stability)
 // ====================================================================
 void telegramNetworkTask(void * parameter) {
   WiFiClientSecure client;
@@ -151,19 +151,17 @@ void telegramNetworkTask(void * parameter) {
       }
 
       unsigned long currentTaskTime = millis();
-      if (currentTaskTime - lastTelegramPoll >= 3000) {
+      if (currentTaskTime - lastTelegramPoll >= 5000) {
         http.begin(client, "https://api.telegram.org/bot" + botToken + "/getUpdates?offset=" + String(lastUpdateId + 1) + "&limit=3&timeout=0");
         int httpCode = http.GET();
         if (httpCode == HTTP_CODE_OK) {
           String payload = http.getString();
-          
           int updateIdx = payload.lastIndexOf("\"update_id\":");
           if (updateIdx != -1) {
             int endIdx = payload.indexOf(",", updateIdx);
             if (endIdx != -1) lastUpdateId = payload.substring(updateIdx + 12, endIdx).toInt();
           }
 
-          // FIX: Search for the COMMAND string itself, ignoring the @botname suffix
           if (payload.indexOf(chatIdx) != -1) {
             if (payload.indexOf("/status") != -1) {
               String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
@@ -203,8 +201,11 @@ void telegramNetworkTask(void * parameter) {
         http.end();
         lastTelegramPoll = currentTaskTime;
       }
+    } else {
+        http.end();
+        vTaskDelay(5000 / portTICK_PERIOD_MS); 
     }
-    vTaskDelay(20 / portTICK_PERIOD_MS); 
+    vTaskDelay(100 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -260,7 +261,8 @@ void loop() {
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   if (!wifiConnected) {
     wasDisconnected = true; 
-    if (now - previousWifiMillis >= 4000) { WiFi.disconnect(); WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS); WiFi.begin(ssid, password); previousWifiMillis = now; }
+    // Increased interval to 15s to stop reconnection loop spam
+    if (now - previousWifiMillis >= 15000) { WiFi.disconnect(); WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS); WiFi.begin(ssid, password); previousWifiMillis = now; }
   } else if (wasDisconnected) { sendAlert("Connection Restored."); wasDisconnected = false; }
   if (wifiConnected && !ntpInitialized) { configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); ntpInitialized = true; }
   if (ntpInitialized && (now - lastTimeCheck > 5000)) { 
