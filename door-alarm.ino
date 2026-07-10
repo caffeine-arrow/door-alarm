@@ -2,6 +2,8 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include "time.h"
 
 // --- Hardware Pins ---
@@ -17,6 +19,10 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 7 * 3600; 
 const int   daylightOffset_sec = 0;
 
+// --- Telegram Configuration (REPLACE THESE BEFORE FLASHING LOCALLY) ---
+const String botToken = "YOUR_TELEGRAM_BOT_TOKEN_HERE";
+const String chatIdx = "YOUR_TELEGRAM_CHAT_ID_HERE";
+
 WebServer server(80);
 Preferences preferences;
 
@@ -31,7 +37,10 @@ bool isDoorOpen = false;
 bool lastDoorState = false; 
 bool ntpInitialized = false;
 
-// --- Schedule Variables (Now starts at 9:30 PM / 21:30) ---
+// --- Telegram State Tracking ---
+bool wasDisconnected = false; 
+
+// --- Schedule Variables (11:30 PM to 5:30 AM Window) ---
 unsigned long nightDisarmTimer = 0;
 bool nightTimerActive = false;
 unsigned long lastTimeCheck = 0;
@@ -83,6 +92,25 @@ void triggerUiFeedback() {
   uiBeepActive = true;
 }
 
+// --- Lightweight Non-Blocking Telegram Notification Engine ---
+void sendTelegramMessage(String message) {
+  if (WiFi.status() != WL_CONNECTED || botToken.indexOf("YOUR_") == 0) return;
+  
+  WiFiClientSecure client;
+  client.setInsecure(); 
+  
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
+  
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  
+  String payload = "{\"chat_id\":\"" + chatIdx + "\",\"text\":\"" + message + "\"}";
+  
+  int httpResponseCode = http.POST(payload);
+  http.end();
+}
+
 // --- Web Endpoints ---
 void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
@@ -116,23 +144,40 @@ void handleAction() {
   triggerUiFeedback(); 
 
   if (cmd == "arm") {
-    if (isDoorOpen) { armPending = true; isArmed = false; } 
-    else { isArmed = true; armPending = false; }
+    if (isDoorOpen) { 
+      armPending = true; 
+      isArmed = false; 
+      sendTelegramMessage("⏳ Panel Alert: Arming Pending (Close the door to complete configuration)");
+    } 
+    else { 
+      isArmed = true; 
+      armPending = false; 
+      sendTelegramMessage("🛡️ Panel Alert: System Armed Manually");
+    }
   } 
   else if (cmd == "disarm") {
     isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
     nightDisarmTimer = millis(); nightTimerActive = true; 
+    sendTelegramMessage("🔓 Panel Alert: System Disarmed Manually");
   } 
   else if (cmd == "hush") {
     isTestingAlarm = false; 
-    if (isAlarmTriggered) isHushed = true;
+    if (isAlarmTriggered) {
+      isHushed = true;
+      sendTelegramMessage("🤫 Panel Alert: Siren Hushed from Web UI");
+    }
     if (!isDoorOpen) { 
       isAlarmTriggered = false; isHushed = false; isArmed = true;
     }
   } 
   else if (cmd == "test") {
     isTestingAlarm = !isTestingAlarm;
-    if (!isTestingAlarm) isHushed = false;
+    if (isTestingAlarm) {
+      sendTelegramMessage("🛠️ Panel Alert: Local Siren Testing Triggered");
+    } else {
+      isHushed = false;
+      sendTelegramMessage("🛠️ Panel Alert: Local Siren Testing Terminated");
+    }
   } 
   else if (cmd == "vol_alarm") {
     alarmVolume = server.arg("val").toInt();
@@ -160,7 +205,9 @@ void setup() {
   alarmVolume = preferences.getInt("vol_alarm", 255); 
   chimeVolume = preferences.getInt("vol_chime", 128);
 
+  // --- Fast WiFi Initialization Protocol ---
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false); 
   WiFi.begin(ssid, password);
 
   if (MDNS.begin("dooralarm")) MDNS.addService("http", "tcp", 80);
@@ -175,11 +222,19 @@ void loop() {
   unsigned long now = millis();
   server.handleClient();
 
-  // 1. Connection Manager
+  // 1. Connection Monitoring Framework
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-  if (!wifiConnected && (now - previousWifiMillis >= 10000)) {
-    WiFi.begin(ssid, password);
-    previousWifiMillis = now;
+  if (!wifiConnected) {
+    wasDisconnected = true; 
+    if (now - previousWifiMillis >= 5000) { 
+      WiFi.begin(ssid, password);
+      previousWifiMillis = now;
+    }
+  } else {
+    if (wasDisconnected) {
+      sendTelegramMessage("✅ Security Core Network Alert: Connection Restored successfully.");
+      wasDisconnected = false;
+    }
   }
 
   if (wifiConnected && !ntpInitialized) {
@@ -187,17 +242,18 @@ void loop() {
     ntpInitialized = true;
   }
 
-  // 2. Schedule Evaluation Engine (9:30 PM [21:30] to 4:00 AM)
-  if (ntpInitialized && (now - lastTimeCheck > 5000)) { // Checked every 5 seconds for snappier debugging
+  // 2. Schedule Evaluation Engine (11:30 PM [23:30] to 5:30 AM)
+  if (ntpInitialized && (now - lastTimeCheck > 5000)) { 
     lastTimeCheck = now;
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
       
-      // Determine if current time falls within 9:30 PM - 3:59 AM execution window
       bool isNight = false;
-      if (timeinfo.tm_hour > 21 || timeinfo.tm_hour < 4) {
+      if (timeinfo.tm_hour < 5) {
         isNight = true;
-      } else if (timeinfo.tm_hour == 21 && timeinfo.tm_min >= 30) {
+      } else if (timeinfo.tm_hour == 5 && timeinfo.tm_min < 30) {
+        isNight = true;
+      } else if (timeinfo.tm_hour == 23 && timeinfo.tm_min >= 30) {
         isNight = true;
       }
 
@@ -205,15 +261,17 @@ void loop() {
         if (isNight) {
           if (isDoorOpen) armPending = true;
           else isArmed = true;
+          sendTelegramMessage("🌙 Night Mode Active: System Scheduled Auto-Arm Enabled");
         }
         bootTimeSet = true; 
       }
 
       if (isNight && !isArmed && !armPending && nightTimerActive) {
-        if (now - nightDisarmTimer >= 3600000) { // 1-hour bypass window rules
+        if (now - nightDisarmTimer >= 3600000) { 
           if (isDoorOpen) armPending = true;
           else isArmed = true;
           nightTimerActive = false;
+          sendTelegramMessage("🌙 Night Mode Refresher: 1-Hour Disarm Bypass Concluded. Re-armed.");
         }
       } else if (!isNight) {
         nightTimerActive = false; 
@@ -229,11 +287,26 @@ void loop() {
     if (!isArmed && !isAlarmTriggered && !isTestingAlarm) {
       chimeTrigger = isDoorOpen ? 1 : 2; 
       audioTimer = now;
+      
+      if (isDoorOpen) {
+        sendTelegramMessage("🚪 Sensor Update: Door Opened");
+      } else {
+        sendTelegramMessage("🚪 Sensor Update: Door Closed");
+      }
     }
 
     if (!isDoorOpen) {
-      if (armPending) { isArmed = true; armPending = false; }
-      if (isAlarmTriggered && isHushed) { isAlarmTriggered = false; isHushed = false; isArmed = true; }
+      if (armPending) { 
+        isArmed = true; 
+        armPending = false; 
+        sendTelegramMessage("🛡️ Status Update: Door Secured. System Completely Armed.");
+      }
+      if (isAlarmTriggered && isHushed) { 
+        isAlarmTriggered = false; 
+        isHushed = false; 
+        isArmed = true; 
+        sendTelegramMessage("🛡️ Status Update: Door Secured post-hush. System Re-armed.");
+      }
     }
 
     if (isDoorOpen && (isArmed || armPending)) { 
@@ -241,6 +314,7 @@ void loop() {
       isHushed = false; 
       isArmed = false; 
       armPending = false; 
+      sendTelegramMessage("🚨 ALERT: Alarm Activated! Security zone breached.");
     }
     lastDoorState = currentDoorState;
   }
