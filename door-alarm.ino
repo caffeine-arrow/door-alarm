@@ -19,6 +19,13 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 7 * 3600; 
 const int   daylightOffset_sec = 0;
 
+// --- Static IP Configuration ---
+IPAddress local_IP(192, 168, 0, 117);
+IPAddress gateway(192, 168, 0, 1);   // Change this if your router IP is different
+IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(8, 8, 8, 8);    // Essential for Telegram & NTP
+IPAddress secondaryDNS(8, 8, 4, 4);
+
 // --- Customization Configuration ---
 const String doorName = "Back Door"; 
 
@@ -95,11 +102,11 @@ void sendAlert(String action) {
   char msgBuffer[256];
   strncpy(msgBuffer, fullMessage.c_str(), sizeof(msgBuffer) - 1);
   msgBuffer[sizeof(msgBuffer) - 1] = '\0';
-  xQueueSend(telegramQueue, &msgBuffer, 0); // Instantly hands off to Core 0
+  xQueueSend(telegramQueue, &msgBuffer, 0); 
 }
 
 // ====================================================================
-// CORE 0 TASK: Dedicated Networking Thread (Prevents Main Loop Lag)
+// CORE 0 TASK: Dedicated Networking Thread 
 // ====================================================================
 void telegramNetworkTask(void * parameter) {
   WiFiClientSecure client;
@@ -177,7 +184,7 @@ void telegramNetworkTask(void * parameter) {
         lastTelegramPoll = currentTaskTime;
       }
     }
-    vTaskDelay(20 / portTICK_PERIOD_MS); // Keeps Core 0 Watchdog happy
+    vTaskDelay(20 / portTICK_PERIOD_MS); 
   }
 }
 // ====================================================================
@@ -241,16 +248,16 @@ void setup() {
   alarmVolume = preferences.getInt("vol_alarm", 255); 
   chimeVolume = preferences.getInt("vol_chime", 128);
 
-  // FreeRTOS Queue Setup (Holds 15 Messages Max)
   telegramQueue = xQueueCreate(15, 256);
-
-  // Pin the Heavy Networking Task to Core 0
   xTaskCreatePinnedToCore(telegramNetworkTask, "TelegramTask", 16384, NULL, 1, NULL, 0);
 
+  // --- Apply Static IP Configuration ---
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); 
+  WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
   WiFi.begin(ssid, password);
 
+  // Kept mDNS just in case, but you should navigate directly to 192.168.0.117
   if (MDNS.begin("dooralarm")) MDNS.addService("http", "tcp", 80);
 
   server.on("/", handleRoot);
@@ -260,17 +267,19 @@ void setup() {
 }
 
 // ====================================================================
-// CORE 1 TASK: Ultra-Fast Hardware Loop (Never Blocks!)
+// CORE 1 TASK: Ultra-Fast Hardware Loop 
 // ====================================================================
 void loop() {
   unsigned long now = millis();
-  server.handleClient(); // Instantly responds to Web UI requests
+  server.handleClient(); 
 
-  // 1. Connection Monitoring
+  // 1. Connection Monitoring with Static IP Re-apply
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   if (!wifiConnected) {
     wasDisconnected = true; 
     if (now - previousWifiMillis >= 4000) { 
+      WiFi.disconnect(); 
+      WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
       WiFi.begin(ssid, password);
       previousWifiMillis = now;
     }
@@ -327,7 +336,7 @@ void loop() {
     lastDoorState = currentDoorState;
   }
 
-  // 4. Audio Processing Engine (Hard Hush Silence Enforcement)
+  // 4. Audio Processing Engine 
   if (isAlarmTriggered && isHushed) { setBuzzerVolume(0); } 
   else if ((isAlarmTriggered && !isHushed) || isTestingAlarm) {
     if ((now % 200) < 150) setBuzzerVolume(alarmVolume); else setBuzzerVolume(0);
