@@ -27,7 +27,7 @@ const int nightEndMin = 30;
 
 // --- Telegram Configuration (Placeholders) ---
 const String botToken = "YOUR_TELEGRAM_BOT_TOKEN_HERE";
-const String chatIdx = "YOUR_GROUP_CHAT_ID_HERE"; // Use -100 prefix for groups
+const String chatIdx = "YOUR_GROUP_CHAT_ID_HERE"; // Must include the -100 prefix
 
 // --- System Variables ---
 WebServer server(80);
@@ -100,24 +100,32 @@ void telegramNetworkTask(void * parameter) {
   for(;;) {
     if (WiFi.status() == WL_CONNECTED && botToken.indexOf("YOUR_") == -1) {
       char txBuffer[256];
+      
+      // 1. Send outgoing messages
       if (xQueueReceive(telegramQueue, &txBuffer, 0) == pdTRUE) {
         http.begin(client, "https://api.telegram.org/bot" + botToken + "/sendMessage");
         http.addHeader("Content-Type", "application/json");
         http.POST("{\"chat_id\":\"" + chatIdx + "\",\"text\":\"" + String(txBuffer) + "\"}");
         http.end();
       }
+      
+      // 2. Poll for incoming messages (ADDED limit=2 TO PREVENT CRASH IN GROUPS)
       if (millis() - lastTelegramPoll >= 3000) {
-        http.begin(client, "https://api.telegram.org/bot" + botToken + "/getUpdates?offset=" + String(lastUpdateId + 1));
+        http.begin(client, "https://api.telegram.org/bot" + botToken + "/getUpdates?limit=2&offset=" + String(lastUpdateId + 1));
         if (http.GET() == HTTP_CODE_OK) {
           String p = http.getString();
           int uIdx = p.lastIndexOf("\"update_id\":");
-          if (uIdx != -1) lastUpdateId = p.substring(uIdx + 12, p.indexOf(",", uIdx)).toInt();
           
-          if (p.indexOf("\"chat\":{\"id\":" + chatIdx) != -1) {
-            if (p.indexOf("/status") != -1) sendAlert("Door: " + String(isDoorOpen?"OPEN":"CLOSED") + " | Status: " + (isArmed?"ARMED":"DISARMED"));
-            else if (p.indexOf("/arm") != -1) { isArmed = !isDoorOpen; armPending = isDoorOpen; sendAlert("Arming requested."); }
-            else if (p.indexOf("/disarm") != -1) { isArmed = false; isAlarmTriggered = false; isHushed = false; sendAlert("Disarmed."); }
-            else if (p.indexOf("/hush") != -1) { isHushed = true; sendAlert("Siren Hushed."); }
+          if (uIdx != -1) {
+            lastUpdateId = p.substring(uIdx + 12, p.indexOf(",", uIdx)).toInt();
+            
+            // Verifies the message came from your specific group chat ID
+            if (p.indexOf("\"chat\":{\"id\":" + chatIdx) != -1) {
+              if (p.indexOf("/status") != -1) sendAlert("Door: " + String(isDoorOpen?"OPEN":"CLOSED") + " | Status: " + (isArmed?"ARMED":"DISARMED"));
+              else if (p.indexOf("/arm") != -1) { isArmed = !isDoorOpen; armPending = isDoorOpen; sendAlert("Arming requested."); }
+              else if (p.indexOf("/disarm") != -1) { isArmed = false; isAlarmTriggered = false; isHushed = false; sendAlert("Disarmed."); }
+              else if (p.indexOf("/hush") != -1) { isHushed = true; sendAlert("Siren Hushed."); }
+            }
           }
         }
         http.end();
@@ -173,7 +181,7 @@ void loop() {
     ntpInitialized = true;
   }
 
-  // Schedule Logic
+  // Schedule Logic (Uses the easy control variables at the top)
   if (now - lastTimeCheck > 10000 && ntpInitialized) {
     lastTimeCheck = now;
     struct tm t;
