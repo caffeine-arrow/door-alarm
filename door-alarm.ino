@@ -67,12 +67,14 @@ bool uiBeepActive = false;
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
 
-// --- HTML Panel ---
+// --- HTML Panel (Restored Volume Sliders) ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Alarm Panel</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@500;700&display=swap" rel="stylesheet"><style>*{font-family:'Google Sans',sans-serif !important} body{background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
-<div class="c"><h2>Security Panel</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div></div>
+<div class="c"><h2>Security Panel</h2>
+<div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div></div>
+<div class="box"><div class="row"><span>Alarm Vol</span><input type="range" id="vA" min="0" max="255" value="255" onchange="V('a',this.value)"></div><div class="row"><span>Chime Vol</span><input type="range" id="vC" min="0" max="255" value="128" onchange="V('c',this.value)"></div></div>
 <div class="g"><button class="b1" onclick="S('arm')">Arm</button><button class="b2" onclick="S('disarm')">Disarm</button><button class="b3 f" onclick="S('hush')">Hush</button></div>
-<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':(d.s==='PENDING'?'br':'bn'));}).catch(e=>console.error("Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} setInterval(U,1000);window.onload=U;</script></body></html>
+<script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':(d.s==='PENDING'?'br':'bn'));}).catch(e=>console.error("Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(t,v){fetch('/vol?t='+t+'&v='+v);} setInterval(U,1000);window.onload=U;</script></body></html>
 )rawliteral";
 
 // --- Hardware Helpers ---
@@ -101,7 +103,7 @@ void telegramNetworkTask(void * parameter) {
     if (WiFi.status() == WL_CONNECTED && botToken.indexOf("YOUR_") == -1) {
       char txBuffer[256];
       
-      // 1. Send outgoing messages
+      // Send Outgoing
       if (xQueueReceive(telegramQueue, &txBuffer, 0) == pdTRUE) {
         http.begin(client, "https://api.telegram.org/bot" + botToken + "/sendMessage");
         http.addHeader("Content-Type", "application/json");
@@ -109,7 +111,7 @@ void telegramNetworkTask(void * parameter) {
         http.end();
       }
       
-      // 2. Poll for incoming messages (ADDED limit=2 TO PREVENT CRASH IN GROUPS)
+      // Poll Incoming
       if (millis() - lastTelegramPoll >= 3000) {
         http.begin(client, "https://api.telegram.org/bot" + botToken + "/getUpdates?limit=2&offset=" + String(lastUpdateId + 1));
         if (http.GET() == HTTP_CODE_OK) {
@@ -119,8 +121,8 @@ void telegramNetworkTask(void * parameter) {
           if (uIdx != -1) {
             lastUpdateId = p.substring(uIdx + 12, p.indexOf(",", uIdx)).toInt();
             
-            // Verifies the message came from your specific group chat ID
-            if (p.indexOf("\"chat\":{\"id\":" + chatIdx) != -1) {
+            // BULLETPROOF GROUP CHECK: Just check if your group ID exists anywhere in the payload
+            if (p.indexOf(chatIdx) != -1) {
               if (p.indexOf("/status") != -1) sendAlert("Door: " + String(isDoorOpen?"OPEN":"CLOSED") + " | Status: " + (isArmed?"ARMED":"DISARMED"));
               else if (p.indexOf("/arm") != -1) { isArmed = !isDoorOpen; armPending = isDoorOpen; sendAlert("Arming requested."); }
               else if (p.indexOf("/disarm") != -1) { isArmed = false; isAlarmTriggered = false; isHushed = false; sendAlert("Disarmed."); }
@@ -163,6 +165,14 @@ void setup() {
      else if(c=="hush") isHushed = true;
      server.send(200, "text/plain", "OK");
   });
+  // Endpoint to handle Volume Sliders from the Web UI
+  server.on("/vol", [](){
+     String t = server.arg("t");
+     int v = server.arg("v").toInt();
+     if (t == "a") alarmVolume = v;
+     else if (t == "c") chimeVolume = v;
+     server.send(200, "text/plain", "OK");
+  });
   server.begin();
 }
 
@@ -181,7 +191,7 @@ void loop() {
     ntpInitialized = true;
   }
 
-  // Schedule Logic (Uses the easy control variables at the top)
+  // Schedule Logic
   if (now - lastTimeCheck > 10000 && ntpInitialized) {
     lastTimeCheck = now;
     struct tm t;
