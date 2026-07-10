@@ -22,46 +22,38 @@ const int   daylightOffset_sec = 0;
 // --- Customization Configuration ---
 const String doorName = "Back Door"; 
 
-// --- Telegram Configuration (Placeholders for Public Repositories) ---
+// --- Telegram Configuration ---
 const String botToken = "YOUR_TELEGRAM_BOT_TOKEN_HERE";
 const String chatIdx = "YOUR_TELEGRAM_CHAT_ID_HERE";
 
 WebServer server(80);
 Preferences preferences;
 
-// --- Core System Variables ---
-bool isArmed = false;          
+// --- Core System Variables (Volatile for Dual-Core Safety) ---
+volatile bool isArmed = false;          
+volatile bool armPending = false;
+volatile bool isAlarmTriggered = false; 
+volatile bool isHushed = false;
+volatile bool isTestingAlarm = false;
+volatile bool isDoorOpen = false;
+volatile unsigned long nightDisarmTimer = 0;
+volatile bool nightTimerActive = false;
+
+// Standard Variables
 bool bootTimeSet = false;
-bool armPending = false;
-bool isAlarmTriggered = false; 
-bool isHushed = false;
-bool isTestingAlarm = false;
-bool isDoorOpen = false;
 bool lastDoorState = false; 
 bool ntpInitialized = false;
-
-// --- State and Performance Trackers ---
 bool wasDisconnected = false; 
-unsigned long lastTelegramPoll = 0;
-long lastUpdateId = 0;
-
-// --- Schedule Variables (11:30 PM to 5:30 AM Window) ---
-unsigned long nightDisarmTimer = 0;
-bool nightTimerActive = false;
 unsigned long lastTimeCheck = 0;
+unsigned long previousWifiMillis = 0;
 
 // --- Audio Variables ---
 int alarmVolume = 255; 
 int chimeVolume = 128;
 int chimeTrigger = 0;  
 unsigned long audioTimer = 0;
-
-// --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
 bool uiBeepActive = false;
-
-// --- WiFi Reconnect ---
-unsigned long previousWifiMillis = 0;
 
 // --- LED Constants ---
 #define LED_OFF 0
@@ -69,6 +61,11 @@ unsigned long previousWifiMillis = 0;
 #define AIRPLANE_BLINK 2
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
+
+// --- Dual-Core Inter-Process Communication ---
+QueueHandle_t telegramQueue;
+long lastUpdateId = 0;
+unsigned long lastTelegramPoll = 0;
 
 // --- Minified Material 3 HTML/CSS (Forced Universal Google Sans) ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -79,7 +76,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <script>function U(){fetch('/st').then(r=>r.json()).then(d=>{let E=(i,t,c)=>{let e=document.getElementById(i);e.innerText=t;e.className='bdg '+c;};E('d',d.d,d.d==='OPEN'?'br':'bg');E('a',d.a,d.a==='ALARM'?'br':'bg');E('s',d.s,d.s==='ARMED'?'bg':(d.s==='PENDING'?'br':'bn'));E('w',d.w,d.w==='ONLINE'?'bg':'br');document.getElementById('t').innerText=d.t;document.getElementById('vA').value=d.va;document.getElementById('vC').value=d.vc;}).catch(e=>console.error("Data Sync Error",e))} function S(c){fetch('/ac?cmd='+c);setTimeout(U,100)} function V(c,v){fetch(`/ac?cmd=${c}&val=${v}`)} setInterval(U,500);window.onload=U;</script></body></html>
 )rawliteral";
 
-// --- Helpers ---
+// --- Hardware Helpers ---
 void setLedState(int pin, int pattern) {
   if (pattern == LED_OFF) digitalWrite(pin, LOW);
   else if (pattern == LED_ON) digitalWrite(pin, HIGH);
@@ -88,117 +85,105 @@ void setLedState(int pin, int pattern) {
   else if (pattern == SLOW_BLINK) digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
 }
 
-void setBuzzerVolume(int vol) {
-  ledcWrite(BUZZER_PIN, vol);
-}
+void setBuzzerVolume(int vol) { ledcWrite(BUZZER_PIN, vol); }
+void triggerUiFeedback() { uiBeepTimer = millis(); uiBeepActive = true; }
 
-void triggerUiFeedback() {
-  uiBeepTimer = millis();
-  uiBeepActive = true;
-}
-
-// --- Dynamic Prefixed Telegram Transmitter ---
-void sendTelegramMessage(String message) {
-  if (WiFi.status() != WL_CONNECTED || botToken.indexOf("YOUR_") == 0) return;
-  
-  WiFiClientSecure client;
-  client.setInsecure(); 
-  
-  HTTPClient http;
-  http.setTimeout(1200); 
-  String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
-  
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  
-  String payload = "{\"chat_id\":\"" + chatIdx + "\",\"text\":\"" + message + "\"}";
-  http.POST(payload);
-  http.end();
-}
-
+// --- Non-Blocking Telegram Transmitter (Pushes to RTOS Queue) ---
 void sendAlert(String action) {
-  sendTelegramMessage(doorName + ": " + action);
+  if (botToken.indexOf("YOUR_") == 0) return;
+  String fullMessage = doorName + ": " + action;
+  char msgBuffer[256];
+  strncpy(msgBuffer, fullMessage.c_str(), sizeof(msgBuffer) - 1);
+  msgBuffer[sizeof(msgBuffer) - 1] = '\0';
+  xQueueSend(telegramQueue, &msgBuffer, 0); // Instantly hands off to Core 0
 }
 
-// --- Optimized Non-Blocking Telegram Command Consumer ---
-void checkTelegramCommands() {
-  if (WiFi.status() != WL_CONNECTED || botToken.indexOf("YOUR_") == 0) return;
-
+// ====================================================================
+// CORE 0 TASK: Dedicated Networking Thread (Prevents Main Loop Lag)
+// ====================================================================
+void telegramNetworkTask(void * parameter) {
   WiFiClientSecure client;
   client.setInsecure();
-
   HTTPClient http;
-  http.setTimeout(1200); 
   
-  String url = "https://api.telegram.org/bot" + botToken + "/getUpdates?offset=" + String(lastUpdateId + 1) + "&limit=3&timeout=0";
-  http.begin(client, url);
-  
-  int httpCode = http.GET();
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    
-    int updateIdx = payload.lastIndexOf("\"update_id\":");
-    if (updateIdx != -1) {
-      int endIdx = payload.indexOf(",", updateIdx);
-      if (endIdx != -1) {
-        lastUpdateId = payload.substring(updateIdx + 12, endIdx).toInt();
+  for(;;) {
+    if (WiFi.status() == WL_CONNECTED && botToken.indexOf("YOUR_") != 0) {
+      
+      // 1. Process Outgoing Messages from the Queue
+      char txBuffer[256];
+      if (xQueueReceive(telegramQueue, &txBuffer, 0) == pdTRUE) {
+        String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
+        http.begin(client, url);
+        http.addHeader("Content-Type", "application/json");
+        String payload = "{\"chat_id\":\"" + chatIdx + "\",\"text\":\"" + String(txBuffer) + "\"}";
+        http.POST(payload);
+        http.end();
       }
-    }
 
-    if (payload.indexOf("\"chat\":{\"id\":" + chatIdx) != -1 || payload.indexOf("\"from\":{\"id\":" + chatIdx) != -1) {
-      if (payload.indexOf("\"text\":\"/status\"") != -1) {
-        String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
-        String alarmStr = (isAlarmTriggered && !isHushed) ? "ALARM" : (isTestingAlarm ? "ALARM" : "OK");
-        String armStr = armPending ? "PENDING" : (isArmed ? "ARMED" : "DISARMED");
-        String wifiStr = (WiFi.status() == WL_CONNECTED) ? "ONLINE" : "OFFLINE";
-        
-        struct tm timeinfo;
-        char timeBuf[12] = "--:--:--";
-        if (ntpInitialized && getLocalTime(&timeinfo, 0)) {
-          sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      // 2. Poll for Incoming Commands (Every 3 seconds)
+      unsigned long currentTaskTime = millis();
+      if (currentTaskTime - lastTelegramPoll >= 3000) {
+        String url = "https://api.telegram.org/bot" + botToken + "/getUpdates?offset=" + String(lastUpdateId + 1) + "&limit=3&timeout=0";
+        http.begin(client, url);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_OK) {
+          String payload = http.getString();
+          
+          int updateIdx = payload.lastIndexOf("\"update_id\":");
+          if (updateIdx != -1) {
+            int endIdx = payload.indexOf(",", updateIdx);
+            if (endIdx != -1) lastUpdateId = payload.substring(updateIdx + 12, endIdx).toInt();
+          }
+
+          if (payload.indexOf("\"chat\":{\"id\":" + chatIdx) != -1 || payload.indexOf("\"from\":{\"id\":" + chatIdx) != -1) {
+            if (payload.indexOf("\"text\":\"/status\"") != -1) {
+              String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
+              String alarmStr = (isAlarmTriggered && !isHushed) ? "ALARM" : (isTestingAlarm ? "ALARM" : "OK");
+              String armStr = armPending ? "PENDING" : (isArmed ? "ARMED" : "DISARMED");
+              String wifiStr = (WiFi.status() == WL_CONNECTED) ? "ONLINE" : "OFFLINE";
+              struct tm timeinfo;
+              char timeBuf[12] = "--:--:--";
+              if (ntpInitialized && getLocalTime(&timeinfo, 0)) sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+              
+              String statusReport = "Status Report\\nDoor: " + doorStr + "\\nAlarm: " + alarmStr + "\\nStatus: " + armStr + "\\nNetwork: " + wifiStr + "\\nTime: " + String(timeBuf);
+              sendAlert(statusReport);
+            }
+            else if (payload.indexOf("\"text\":\"/arm\"") != -1) {
+              if (isDoorOpen) { armPending = true; isArmed = false; sendAlert("Arming Pending"); } 
+              else { isArmed = true; armPending = false; sendAlert("System Armed Manually"); }
+            }
+            else if (payload.indexOf("\"text\":\"/disarm\"") != -1) {
+              isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
+              nightDisarmTimer = millis(); nightTimerActive = true; 
+              sendAlert("System Disarmed Manually");
+            }
+            else if (payload.indexOf("\"text\":\"/hush\"") != -1) {
+              isTestingAlarm = false; 
+              if (isAlarmTriggered) { isHushed = true; sendAlert("Siren Hushed"); }
+              if (!isDoorOpen) { isAlarmTriggered = false; isHushed = false; isArmed = true; }
+            }
+            else if (payload.indexOf("\"text\":\"/testalarmnow\"") != -1) {
+              isTestingAlarm = !isTestingAlarm;
+              if (isTestingAlarm) sendAlert("Local Siren Testing Triggered");
+              else { isHushed = false; sendAlert("Local Siren Testing Terminated"); }
+            }
+            else if (payload.indexOf("\"text\":\"/rebootnow\"") != -1) {
+              sendAlert("Rebooting System Now");
+              delay(300); ESP.restart();
+            }
+          }
         }
-
-        String statusReport = "Status Report\\n";
-        statusReport += "Door: " + doorStr + "\\n";
-        statusReport += "Alarm: " + alarmStr + "\\n";
-        statusReport += "Status: " + armStr + "\\n";
-        statusReport += "Network: " + wifiStr + "\\n";
-        statusReport += "Time: " + String(timeBuf);
-        
-        sendAlert(statusReport);
-      }
-      else if (payload.indexOf("\"text\":\"/arm\"") != -1) {
-        if (isDoorOpen) { armPending = true; isArmed = false; sendAlert("Arming Pending"); } 
-        else { isArmed = true; armPending = false; sendAlert("System Armed Manually"); }
-      }
-      else if (payload.indexOf("\"text\":\"/disarm\"") != -1) {
-        isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
-        nightDisarmTimer = millis(); nightTimerActive = true; 
-        sendAlert("System Disarmed Manually");
-      }
-      else if (payload.indexOf("\"text\":\"/hush\"") != -1) {
-        isTestingAlarm = false; 
-        if (isAlarmTriggered) { isHushed = true; sendAlert("Siren Hushed"); }
-        if (!isDoorOpen) { isAlarmTriggered = false; isHushed = false; isArmed = true; }
-      }
-      else if (payload.indexOf("\"text\":\"/testalarmnow\"") != -1) {
-        isTestingAlarm = !isTestingAlarm;
-        if (isTestingAlarm) sendAlert("Local Siren Testing Triggered");
-        else { isHushed = false; sendAlert("Local Siren Testing Terminated"); }
-      }
-      else if (payload.indexOf("\"text\":\"/rebootnow\"") != -1) {
-        sendAlert("Rebooting System Now");
-        delay(300);
-        ESP.restart();
+        http.end();
+        lastTelegramPoll = currentTaskTime;
       }
     }
+    vTaskDelay(20 / portTICK_PERIOD_MS); // Keeps Core 0 Watchdog happy
   }
-  http.end();
 }
+// ====================================================================
 
 // --- Web Endpoints ---
 void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
-
 void handleStatus() {
   String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
   String alarmStr = (isAlarmTriggered && !isHushed) ? "ALARM" : (isTestingAlarm ? "ALARM" : "OK");
@@ -211,16 +196,7 @@ void handleStatus() {
     sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
-  String json = "{";
-  json += "\"d\":\"" + doorStr + "\",";
-  json += "\"a\":\"" + alarmStr + "\",";
-  json += "\"s\":\"" + armStr + "\",";
-  json += "\"w\":\"" + wifiStr + "\",";
-  json += "\"t\":\"" + String(timeBuf) + "\",";
-  json += "\"va\":" + String(alarmVolume) + ",";
-  json += "\"vc\":" + String(chimeVolume);
-  json += "}";
-  
+  String json = "{\"d\":\"" + doorStr + "\",\"a\":\"" + alarmStr + "\",\"s\":\"" + armStr + "\",\"w\":\"" + wifiStr + "\",\"t\":\"" + String(timeBuf) + "\",\"va\":" + String(alarmVolume) + ",\"vc\":" + String(chimeVolume) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -234,8 +210,7 @@ void handleAction() {
   } 
   else if (cmd == "disarm") {
     isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
-    nightDisarmTimer = millis(); nightTimerActive = true; 
-    sendAlert("System Disarmed Manually");
+    nightDisarmTimer = millis(); nightTimerActive = true; sendAlert("System Disarmed Manually");
   } 
   else if (cmd == "hush") {
     isTestingAlarm = false; 
@@ -247,15 +222,8 @@ void handleAction() {
     if (isTestingAlarm) sendAlert("Local Siren Testing Triggered");
     else { isHushed = false; sendAlert("Local Siren Testing Terminated"); }
   } 
-  else if (cmd == "vol_alarm") {
-    alarmVolume = server.arg("val").toInt();
-    preferences.putInt("vol_alarm", alarmVolume);
-  } 
-  else if (cmd == "vol_chime") {
-    chimeVolume = server.arg("val").toInt();
-    preferences.putInt("vol_chime", chimeVolume);
-  }
-  
+  else if (cmd == "vol_alarm") { alarmVolume = server.arg("val").toInt(); preferences.putInt("vol_alarm", alarmVolume); } 
+  else if (cmd == "vol_chime") { chimeVolume = server.arg("val").toInt(); preferences.putInt("vol_chime", chimeVolume); }
   server.send(200, "text/plain", "OK");
 }
 
@@ -273,7 +241,12 @@ void setup() {
   alarmVolume = preferences.getInt("vol_alarm", 255); 
   chimeVolume = preferences.getInt("vol_chime", 128);
 
-  // Fast Wi-Fi Connection Directives
+  // FreeRTOS Queue Setup (Holds 15 Messages Max)
+  telegramQueue = xQueueCreate(15, 256);
+
+  // Pin the Heavy Networking Task to Core 0
+  xTaskCreatePinnedToCore(telegramNetworkTask, "TelegramTask", 16384, NULL, 1, NULL, 0);
+
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); 
   WiFi.begin(ssid, password);
@@ -286,9 +259,12 @@ void setup() {
   server.begin();
 }
 
+// ====================================================================
+// CORE 1 TASK: Ultra-Fast Hardware Loop (Never Blocks!)
+// ====================================================================
 void loop() {
   unsigned long now = millis();
-  server.handleClient();
+  server.handleClient(); // Instantly responds to Web UI requests
 
   // 1. Connection Monitoring
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
@@ -298,16 +274,9 @@ void loop() {
       WiFi.begin(ssid, password);
       previousWifiMillis = now;
     }
-  } else {
-    if (wasDisconnected) {
-      sendAlert("Connection Restored.");
-      wasDisconnected = false;
-    }
-    // Background polling loop for incoming command checking
-    if (now - lastTelegramPoll >= 3000) {
-      checkTelegramCommands();
-      lastTelegramPoll = now;
-    }
+  } else if (wasDisconnected) {
+    sendAlert("Connection Restored.");
+    wasDisconnected = false;
   }
 
   if (wifiConnected && !ntpInitialized) {
@@ -315,40 +284,23 @@ void loop() {
     ntpInitialized = true;
   }
 
-  // 2. Schedule Evaluation Engine (11:30 PM [23:30] to 5:30 AM)
+  // 2. Schedule Evaluation Engine (11:30 PM to 5:30 AM)
   if (ntpInitialized && (now - lastTimeCheck > 5000)) { 
     lastTimeCheck = now;
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
-      
-      bool isNight = false;
-      if (timeinfo.tm_hour < 5) {
-        isNight = true;
-      } else if (timeinfo.tm_hour == 5 && timeinfo.tm_min < 30) {
-        isNight = true;
-      } else if (timeinfo.tm_hour == 23 && timeinfo.tm_min >= 30) {
-        isNight = true;
-      }
+      bool isNight = (timeinfo.tm_hour < 5) || (timeinfo.tm_hour == 5 && timeinfo.tm_min < 30) || (timeinfo.tm_hour == 23 && timeinfo.tm_min >= 30);
 
       if (!bootTimeSet) { 
-        if (isNight) {
-          if (isDoorOpen) armPending = true;
-          else isArmed = true;
-          sendAlert("Night Mode Active: System Scheduled Auto-Arm Enabled");
-        }
+        if (isNight) { if (isDoorOpen) armPending = true; else isArmed = true; sendAlert("Night Mode Active: System Scheduled Auto-Arm Enabled"); }
         bootTimeSet = true; 
       }
-
       if (isNight && !isArmed && !armPending && nightTimerActive) {
         if (now - nightDisarmTimer >= 3600000) { 
-          if (isDoorOpen) armPending = true;
-          else isArmed = true;
-          nightTimerActive = false;
-          sendAlert("Night Mode Refresher: 1-Hour Disarm Bypass Concluded. Re-armed.");
+          if (isDoorOpen) armPending = true; else isArmed = true;
+          nightTimerActive = false; sendAlert("Night Mode Refresher: 1-Hour Disarm Bypass Concluded. Re-armed.");
         }
-      } else if (!isNight) {
-        nightTimerActive = false; 
-      }
+      } else if (!isNight) nightTimerActive = false; 
     }
   }
 
@@ -360,42 +312,25 @@ void loop() {
     if (!isArmed && !isAlarmTriggered && !isTestingAlarm) {
       chimeTrigger = isDoorOpen ? 1 : 2; 
       audioTimer = now;
-      
-      if (isDoorOpen) sendAlert("Door Opened");
-      else sendAlert("Door Closed");
+      if (isDoorOpen) sendAlert("Door Opened"); else sendAlert("Door Closed");
     }
 
     if (!isDoorOpen) {
-      if (armPending) { 
-        isArmed = true; 
-        armPending = false; 
-        sendAlert("Status Update: Door Secured. System Completely Armed.");
-      }
-      if (isAlarmTriggered && isHushed) { 
-        isAlarmTriggered = false; 
-        isHushed = false; 
-        isArmed = true; 
-        sendAlert("Status Update: Door Secured post-hush. System Re-armed.");
-      }
+      if (armPending) { isArmed = true; armPending = false; sendAlert("Status Update: Door Secured. System Completely Armed."); }
+      if (isAlarmTriggered && isHushed) { isAlarmTriggered = false; isHushed = false; isArmed = true; sendAlert("Status Update: Door Secured post-hush. System Re-armed."); }
     }
 
     if (isDoorOpen && (isArmed || armPending)) { 
-      isAlarmTriggered = true; 
-      isHushed = false; 
-      isArmed = false; 
-      armPending = false; 
+      isAlarmTriggered = true; isHushed = false; isArmed = false; armPending = false; 
       sendAlert("ALERT: Alarm Activated! Security zone breached.");
     }
     lastDoorState = currentDoorState;
   }
 
   // 4. Audio Processing Engine (Hard Hush Silence Enforcement)
-  if (isAlarmTriggered && isHushed) {
-    setBuzzerVolume(0); 
-  } 
+  if (isAlarmTriggered && isHushed) { setBuzzerVolume(0); } 
   else if ((isAlarmTriggered && !isHushed) || isTestingAlarm) {
-    if ((now % 200) < 150) setBuzzerVolume(alarmVolume);
-    else setBuzzerVolume(0);
+    if ((now % 200) < 150) setBuzzerVolume(alarmVolume); else setBuzzerVolume(0);
     chimeTrigger = 0; uiBeepActive = false; 
   } 
   else if (uiBeepActive) {
@@ -405,23 +340,13 @@ void loop() {
   else if (chimeTrigger > 0) {
     unsigned long elapsed = now - audioTimer;
     if (chimeTrigger == 1) { 
-      if (elapsed < 120) setBuzzerVolume(chimeVolume);
-      else if (elapsed < 160) setBuzzerVolume(0);
-      else if (elapsed < 280) setBuzzerVolume(chimeVolume / 2);
-      else { setBuzzerVolume(0); chimeTrigger = 0; }
+      if (elapsed < 120) setBuzzerVolume(chimeVolume); else if (elapsed < 160) setBuzzerVolume(0); else if (elapsed < 280) setBuzzerVolume(chimeVolume / 2); else { setBuzzerVolume(0); chimeTrigger = 0; }
+    } else if (chimeTrigger == 2) { 
+      if (elapsed < 120) setBuzzerVolume(chimeVolume); else if (elapsed < 180) setBuzzerVolume(0); else if (elapsed < 300) setBuzzerVolume(chimeVolume); else { setBuzzerVolume(0); chimeTrigger = 0; }
     }
-    else if (chimeTrigger == 2) { 
-      if (elapsed < 120) setBuzzerVolume(chimeVolume);
-      else if (elapsed < 180) setBuzzerVolume(0);
-      else if (elapsed < 300) setBuzzerVolume(chimeVolume);
-      else { setBuzzerVolume(0); chimeTrigger = 0; }
-    }
-  }
-  else {
-    setBuzzerVolume(0); 
-  }
+  } else setBuzzerVolume(0); 
 
-  // 5. LED Driving Modules
+  // 5. Flawless LED Driving Modules
   setLedState(DOOR_LED_PIN, isDoorOpen ? AIRPLANE_BLINK : LED_ON);
   if (!wifiConnected) setLedState(ARMED_LED_PIN, RAPID_BLINK);
   else if (isAlarmTriggered) setLedState(ARMED_LED_PIN, SLOW_BLINK);
