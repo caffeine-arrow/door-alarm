@@ -59,7 +59,7 @@ volatile bool isHushed = false;
 volatile bool isTestingAlarm = false;
 volatile bool isDoorOpen = false;
 bool lastDoorState = false; 
-volatile bool ntpInitialized = false; // Made volatile for Cross-Core safety
+bool ntpInitialized = false;
 volatile bool shouldReboot = false; 
 
 // --- Schedule Variables ---
@@ -152,7 +152,12 @@ void handleNewMessages(int numNewMessages) {
     } 
     else if (text == "/rebootnow" || text == "/rebootnow" + mention) {
       bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_REBOOTING, "");
-      shouldReboot = true; 
+      
+      // CRITICAL FIX: Explicitly acknowledge the reboot command to Telegram's servers immediately.
+      // If we don't do this, the ESP32 restarts, Telegram thinks the command failed, and sends it again on boot (Infinite Bootloop).
+      bot.getUpdates(bot.last_message_received + 1); 
+      
+      shouldReboot = true; // Safely handed off to main loop
     } 
     else if (text == "/testalarmnow" || text == "/testalarmnow" + mention) {
       isTestingAlarm = !isTestingAlarm;
@@ -187,9 +192,7 @@ void handleNewMessages(int numNewMessages) {
 // --- FreeRTOS Telegram Background Task (Pinned to Core 0) ---
 void telegramTask(void *pvParameters) {
   for (;;) {
-    // CRITICAL FIX: Ensure NTP is completely initialized BEFORE touching HTTPS / mbedtls to prevent SW_CPU_RESET
-    if (WiFi.status() == WL_CONNECTED && ntpInitialized) {
-      
+    if (WiFi.status() == WL_CONNECTED) {
       // Process outgoing message queue from Core 1
       char outMsg[64];
       while (xQueueReceive(tgQueue, &outMsg, 0) == pdPASS) {
@@ -204,12 +207,11 @@ void telegramTask(void *pvParameters) {
         numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       }
     }
-    // 1-second delay ensures Wi-Fi stack has CPU time and prevents LwIP starvation
-    vTaskDelay(pdMS_TO_TICKS(1000)); 
+    vTaskDelay(pdMS_TO_TICKS(500)); // Snappy 500ms delay
   }
 }
 
-// --- Web Endpoints (Unchanged JSON logic) ---
+// --- Web Endpoints ---
 void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 void handleStatus() {
@@ -273,13 +275,6 @@ void handleAction() {
 }
 
 void setup() {
-  // CRITICAL FIX: Trigger Wi-Fi connection immediately on boot.
-  // Hardware handles it concurrently in background. Set AutoReconnect to kill "return error" spam natively.
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false); 
-  WiFi.setAutoReconnect(true); 
-  WiFi.begin(ssid, password);
-
   pinMode(REED_PIN, INPUT_PULLUP);
   pinMode(ARMED_LED_PIN, OUTPUT);
   pinMode(DOOR_LED_PIN, OUTPUT);
@@ -293,16 +288,23 @@ void setup() {
   alarmVolume = preferences.getInt("vol_alarm", 255); 
   chimeVolume = preferences.getInt("vol_chime", 128);
 
+  // CRITICAL FIX: Robust, instant Wi-Fi initiation. Clears corrupt states and uses hardware auto-reconnect.
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true); 
+  delay(100);
+  WiFi.setHostname("DoorAlarm");
+  WiFi.setSleep(false); 
+  WiFi.setAutoReconnect(true); // Hardware level auto-reconnect (Zero latency, prevents loops)
+  WiFi.begin(ssid, password);
+
   secured_client.setInsecure(); 
-  secured_client.setTimeout(2); // Prevent hanging sockets from causing watchdog triggers
 
   tgQueue = xQueueCreate(15, sizeof(char[64]));
 
-  // Create task with larger stack (10240) for safe mbedtls execution
   xTaskCreatePinnedToCore(
     telegramTask,   
     "TelegramTask", 
-    10240,           
+    8192,           
     NULL,           
     1,              
     NULL,           
@@ -318,9 +320,9 @@ void setup() {
 }
 
 void loop() {
-  // Safe Reboot handling (Prevents crashing the Core 0 task)
+  // Safe Reboot handling execution
   if (shouldReboot) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    delay(1000); // Give the Core 0 task just enough time to breathe before execution
     ESP.restart();
   }
 
@@ -333,15 +335,10 @@ void loop() {
 
   if (wifiConnected && !ntpInitialized) {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    
-    // Give NTP a fraction of a second to fetch before unlocking Telegram task
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo, 1000)) {
-      ntpInitialized = true;
-    }
+    ntpInitialized = true;
   }
 
-  if (wifiConnected && ntpInitialized && !bootMessageSent) {
+  if (wifiConnected && !bootMessageSent) {
     enqueueTgMsg(MSG_CONNECTED);
     bootMessageSent = true;
   }
