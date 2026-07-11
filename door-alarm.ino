@@ -41,6 +41,8 @@ const String MSG_STATUS_TITLE = "Status Report";
 const int scheduleStartHour = 21;
 const int scheduleStartMinute = 30;
 const int scheduleEndHour = 4;
+const int scheduleEndMinute = 0;
+const bool scheduleEndsNextDay = true; // Toggle: true = crosses midnight into tomorrow, false = ends on the same day
 
 WebServer server(80);
 Preferences preferences;
@@ -246,10 +248,12 @@ void handleAction() {
   if (cmd == "arm") {
     if (isDoorOpen) { armPending = true; isArmed = false; } 
     else { isArmed = true; armPending = false; }
+    enqueueTgMsg(MSG_ARMED + " (WEB UI)");
   } 
   else if (cmd == "disarm") {
     isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
     nightDisarmTimer = millis(); nightTimerActive = true; 
+    enqueueTgMsg(MSG_DISARMED + " (WEB UI)");
   } 
   else if (cmd == "hush") {
     isTestingAlarm = false; 
@@ -257,10 +261,12 @@ void handleAction() {
     if (!isDoorOpen) { 
       isAlarmTriggered = false; isHushed = false; isArmed = true;
     }
+    enqueueTgMsg(MSG_HUSHED + " (WEB UI)");
   } 
   else if (cmd == "test") {
     isTestingAlarm = !isTestingAlarm;
     if (!isTestingAlarm) isHushed = false;
+    enqueueTgMsg(MSG_TESTING + " (WEB UI)");
   } 
   else if (cmd == "vol_alarm") {
     alarmVolume = server.arg("val").toInt();
@@ -349,11 +355,23 @@ void loop() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
       
+      int currentMins = (timeinfo.tm_hour * 60) + timeinfo.tm_min;
+      int startMins = (scheduleStartHour * 60) + scheduleStartMinute;
+      int endMins = (scheduleEndHour * 60) + scheduleEndMinute;
+
       bool isNight = false;
-      if (timeinfo.tm_hour > scheduleStartHour || timeinfo.tm_hour < scheduleEndHour) {
-        isNight = true;
-      } else if (timeinfo.tm_hour == scheduleStartHour && timeinfo.tm_min >= scheduleStartMinute) {
-        isNight = true;
+
+      // Intuitive Boolean logic based on the user toggle
+      if (scheduleEndsNextDay) {
+        // Condition matches anytime we are past the start time TODAY, or before the end time TOMORROW
+        if (currentMins >= startMins || currentMins < endMins) {
+          isNight = true;
+        }
+      } else {
+        // Condition is standard same-day boundaries (e.g. 08:00 to 17:00)
+        if (currentMins >= startMins && currentMins < endMins) {
+          isNight = true;
+        }
       }
 
       if (!bootTimeSet) { 
