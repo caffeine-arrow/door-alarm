@@ -22,8 +22,20 @@ const int   daylightOffset_sec = 0;
 // --- Telegram Configuration (Top Level Access) ---
 const char* BOT_TOKEN = "YOUR_BOT_TOKEN_HERE";
 const String CHAT_ID = "YOUR_CHAT_ID_HERE";
-const String BOT_USERNAME = "YourBotUsername"; // Do not include the '@' symbol here
+const String BOT_USERNAME = "YourBotUsername"; 
 const String TG_PREFIX = "Back Door: ";
+
+// --- Telegram Custom Messages (Title Case) ---
+const String MSG_ARMED = "Alarm Armed.";
+const String MSG_DISARMED = "Alarm Disarmed.";
+const String MSG_HUSHED = "Alarm Hushed.";
+const String MSG_REBOOTING = "Rebooting System.";
+const String MSG_TESTING = "Local Alarm Testing Initiated.";
+const String MSG_DOOR_OPEN = "Door Opened.";
+const String MSG_DOOR_CLOSED = "Door Closed.";
+const String MSG_ALARM_ACTIVATED = "Alarm Activated.";
+const String MSG_CONNECTED = "Connection Restored.";
+const String MSG_STATUS_TITLE = "Status Report";
 
 // --- Schedule Configuration (Top Level Access) ---
 const int scheduleStartHour = 21;
@@ -48,6 +60,7 @@ volatile bool isTestingAlarm = false;
 volatile bool isDoorOpen = false;
 bool lastDoorState = false; 
 bool ntpInitialized = false;
+volatile bool shouldReboot = false; // Safe reboot flag
 
 // --- Schedule Variables ---
 unsigned long nightDisarmTimer = 0;
@@ -63,9 +76,6 @@ unsigned long audioTimer = 0;
 // --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
 bool uiBeepActive = false;
-
-// --- WiFi Reconnect ---
-unsigned long previousWifiMillis = 0;
 
 // --- LED Constants ---
 #define LED_OFF 0
@@ -101,11 +111,18 @@ void triggerUiFeedback() {
   uiBeepActive = true;
 }
 
+// --- WiFi Auto-Reconnect Event Handler ---
+void onWiFiEvent(WiFiEvent_t event) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    WiFi.reconnect(); 
+  }
+}
+
 // --- FreeRTOS Queue Helper ---
-void enqueueTgMsg(const char* msg) {
+void enqueueTgMsg(const String& msg) {
   if (tgQueue != NULL) {
     char buffer[64];
-    strncpy(buffer, msg, sizeof(buffer) - 1);
+    strncpy(buffer, msg.c_str(), sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
     xQueueSend(tgQueue, &buffer, (TickType_t)0);
   }
@@ -114,7 +131,7 @@ void enqueueTgMsg(const char* msg) {
 // --- Telegram Command Processor (Runs on Core 0) ---
 void handleNewMessages(int numNewMessages) {
   for (int i = 0; i < numNewMessages; i++) {
-    if (String(bot.messages[i].chat_id) != CHAT_ID) continue; // Restrict to exact Group Chat
+    if (String(bot.messages[i].chat_id) != CHAT_ID) continue; 
 
     String text = bot.messages[i].text;
     String mention = "@" + BOT_USERNAME;
@@ -122,13 +139,13 @@ void handleNewMessages(int numNewMessages) {
     if (text == "/arm" || text == "/arm" + mention) {
       if (isDoorOpen) { armPending = true; isArmed = false; } 
       else { isArmed = true; armPending = false; }
-      bot.sendMessage(CHAT_ID, TG_PREFIX + "Alarm armed.", "");
+      bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_ARMED, "");
       triggerUiFeedback();
     } 
     else if (text == "/disarm" || text == "/disarm" + mention || text == "/disarmed" || text == "/disarmed" + mention) {
       isArmed = false; armPending = false; isAlarmTriggered = false; isHushed = false; isTestingAlarm = false;
       nightDisarmTimer = millis(); nightTimerActive = true; 
-      bot.sendMessage(CHAT_ID, TG_PREFIX + "Alarm disarmed.", "");
+      bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_DISARMED, "");
       triggerUiFeedback();
     } 
     else if (text == "/hush" || text == "/hush" + mention) {
@@ -137,25 +154,25 @@ void handleNewMessages(int numNewMessages) {
       if (!isDoorOpen) { 
         isAlarmTriggered = false; isHushed = false; isArmed = true;
       }
-      bot.sendMessage(CHAT_ID, TG_PREFIX + "Alarm hushed", "");
+      bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_HUSHED, "");
       triggerUiFeedback();
     } 
     else if (text == "/rebootnow" || text == "/rebootnow" + mention) {
-      bot.sendMessage(CHAT_ID, TG_PREFIX + "Rebooting.", "");
-      delay(500);
-      ESP.restart();
+      bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_REBOOTING, "");
+      shouldReboot = true; // Safely handed off to main loop
     } 
     else if (text == "/testalarmnow" || text == "/testalarmnow" + mention) {
       isTestingAlarm = !isTestingAlarm;
       if (!isTestingAlarm) isHushed = false;
-      bot.sendMessage(CHAT_ID, TG_PREFIX + "Local Alarm testing initiated.", "");
+      bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_TESTING, "");
       triggerUiFeedback();
     } 
     else if (text == "/status" || text == "/status" + mention) {
-      String doorStr = isDoorOpen ? "OPEN" : "CLOSED";
-      String alarmStr = (isAlarmTriggered && !isHushed) ? "ALARM" : (isTestingAlarm ? "ALARM" : "OK");
-      String armStr = armPending ? "PENDING" : (isArmed ? "ARMED" : "DISARMED");
-      String wifiStr = (WiFi.status() == WL_CONNECTED) ? "ONLINE" : "OFFLINE";
+      // Formatted exclusively for Telegram
+      String tDoor = isDoorOpen ? "Open" : "Closed";
+      String tAlarm = (isAlarmTriggered && !isHushed) ? "Alarm" : (isTestingAlarm ? "Alarm" : "Ok");
+      String tSys = armPending ? "Pending" : (isArmed ? "Armed" : "Disarmed");
+      String tNet = (WiFi.status() == WL_CONNECTED) ? "Online" : "Offline";
       
       struct tm timeinfo;
       char timeBuf[12] = "--:--:--";
@@ -163,11 +180,11 @@ void handleNewMessages(int numNewMessages) {
         sprintf(timeBuf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
       }
 
-      String msg = "Status Report\n";
-      msg += "Door: " + doorStr + "\n";
-      msg += "Alarm: " + alarmStr + "\n";
-      msg += "System: " + armStr + "\n";
-      msg += "Network: " + wifiStr + "\n";
+      String msg = MSG_STATUS_TITLE + "\n";
+      msg += "Door: " + tDoor + "\n";
+      msg += "Alarm: " + tAlarm + "\n";
+      msg += "System: " + tSys + "\n";
+      msg += "Network: " + tNet + "\n";
       msg += "Time: " + String(timeBuf);
       
       bot.sendMessage(CHAT_ID, TG_PREFIX + msg, "");
@@ -179,25 +196,25 @@ void handleNewMessages(int numNewMessages) {
 void telegramTask(void *pvParameters) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
-      // 1. Process outgoing message queue from Core 1
+      // Process outgoing message queue from Core 1
       char outMsg[64];
       while (xQueueReceive(tgQueue, &outMsg, 0) == pdPASS) {
         bot.sendMessage(CHAT_ID, TG_PREFIX + String(outMsg), "");
         vTaskDelay(pdMS_TO_TICKS(100)); // Rate limit buffer
       }
       
-      // 2. Poll for incoming group chat commands
+      // Poll for incoming group chat commands
       int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       while (numNewMessages) {
         handleNewMessages(numNewMessages);
         numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Poll every 1 second to prevent watchdog triggers
+    vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay for snappier responses
   }
 }
 
-// --- Web Endpoints ---
+// --- Web Endpoints (Unchanged JSON logic) ---
 void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 void handleStatus() {
@@ -275,22 +292,22 @@ void setup() {
   chimeVolume = preferences.getInt("vol_chime", 128);
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false); // Eliminates ping and connection latency
+  WiFi.onEvent(onWiFiEvent); 
   WiFi.begin(ssid, password);
 
-  secured_client.setInsecure(); // Required for Telegram Bot on ESP32 without explicit cert handling
+  secured_client.setInsecure(); 
 
-  // Create Message Queue with safe buffer
   tgQueue = xQueueCreate(15, sizeof(char[64]));
 
-  // Start FreeRTOS Telegram loop on separate background core
   xTaskCreatePinnedToCore(
-    telegramTask,   /* Task function */
-    "TelegramTask", /* Task name */
-    8192,           /* Stack size */
-    NULL,           /* Parameters */
-    1,              /* Priority */
-    NULL,           /* Task handle */
-    0               /* Pinned to core 0 (Leaving loop() isolated on core 1) */
+    telegramTask,   
+    "TelegramTask", 
+    8192,           
+    NULL,           
+    1,              
+    NULL,           
+    0               
   );
 
   if (MDNS.begin("dooralarm")) MDNS.addService("http", "tcp", 80);
@@ -302,17 +319,18 @@ void setup() {
 }
 
 void loop() {
+  // Safe Reboot handling
+  if (shouldReboot) {
+    delay(1000);
+    ESP.restart();
+  }
+
   unsigned long now = millis();
   server.handleClient();
 
   // 1. Connection Manager
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   static bool bootMessageSent = false;
-  
-  if (!wifiConnected && (now - previousWifiMillis >= 10000)) {
-    WiFi.begin(ssid, password);
-    previousWifiMillis = now;
-  }
 
   if (wifiConnected && !ntpInitialized) {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
@@ -320,7 +338,7 @@ void loop() {
   }
 
   if (wifiConnected && !bootMessageSent) {
-    enqueueTgMsg("Connection restored.");
+    enqueueTgMsg(MSG_CONNECTED);
     bootMessageSent = true;
   }
 
@@ -330,7 +348,6 @@ void loop() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) { 
       
-      // Dynamic Scheduling logic using variables at top
       bool isNight = false;
       if (timeinfo.tm_hour > scheduleStartHour || timeinfo.tm_hour < scheduleEndHour) {
         isNight = true;
@@ -363,9 +380,9 @@ void loop() {
   if (currentDoorState != lastDoorState) {
     isDoorOpen = currentDoorState;
     
-    // Telegram Trigger: Door Edges
-    if (isDoorOpen) enqueueTgMsg("Door Opened");
-    else enqueueTgMsg("Door closed");
+    // Telegram Trigger
+    if (isDoorOpen) enqueueTgMsg(MSG_DOOR_OPEN);
+    else enqueueTgMsg(MSG_DOOR_CLOSED);
 
     if (!isArmed && !isAlarmTriggered && !isTestingAlarm) {
       chimeTrigger = isDoorOpen ? 1 : 2; 
@@ -378,7 +395,7 @@ void loop() {
     }
 
     if (isDoorOpen && (isArmed || armPending)) { 
-      if (!isAlarmTriggered) enqueueTgMsg("Alarm activated"); // Telegram Trigger: Alarm Run
+      if (!isAlarmTriggered) enqueueTgMsg(MSG_ALARM_ACTIVATED); 
       isAlarmTriggered = true; 
       isHushed = false; 
       isArmed = false; 
