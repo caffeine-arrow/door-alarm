@@ -74,6 +74,7 @@ int alarmVolume = 255;
 int chimeVolume = 128;
 int chimeTrigger = 0;  
 unsigned long audioTimer = 0;
+bool isBuzzerAttached = false; // Tracks if PWM is currently controlling the pin
 
 // --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
@@ -104,8 +105,22 @@ void setLedState(int pin, int pattern) {
   else if (pattern == SLOW_BLINK) digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
 }
 
+// CRITICAL FIX: Dynamically detaches PWM when volume is 0 to kill the DAC pin float voltage.
 void setBuzzerVolume(int vol) {
-  ledcWrite(BUZZER_PIN, vol);
+  if (vol <= 0) {
+    if (isBuzzerAttached) {
+      ledcDetach(BUZZER_PIN);        // Rip control away from the PWM peripheral
+      pinMode(BUZZER_PIN, OUTPUT);   // Re-assert as a standard digital pin
+      digitalWrite(BUZZER_PIN, LOW); // Force hard to GND (0V)
+      isBuzzerAttached = false;
+    }
+  } else {
+    if (!isBuzzerAttached) {
+      ledcAttach(BUZZER_PIN, 2400, 8); // Reattach PWM controller
+      isBuzzerAttached = true;
+    }
+    ledcWrite(BUZZER_PIN, vol);
+  }
 }
 
 void triggerUiFeedback() {
@@ -154,12 +169,8 @@ void handleNewMessages(int numNewMessages) {
     } 
     else if (text == "/rebootnow" || text == "/rebootnow" + mention) {
       bot.sendMessage(CHAT_ID, TG_PREFIX + MSG_REBOOTING, "");
-      
-      // CRITICAL FIX: Explicitly acknowledge the reboot command to Telegram's servers immediately.
-      // If we don't do this, the ESP32 restarts, Telegram thinks the command failed, and sends it again on boot (Infinite Bootloop).
       bot.getUpdates(bot.last_message_received + 1); 
-      
-      shouldReboot = true; // Safely handed off to main loop
+      shouldReboot = true; 
     } 
     else if (text == "/testalarmnow" || text == "/testalarmnow" + mention) {
       isTestingAlarm = !isTestingAlarm;
@@ -195,21 +206,19 @@ void handleNewMessages(int numNewMessages) {
 void telegramTask(void *pvParameters) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
-      // Process outgoing message queue from Core 1
       char outMsg[64];
       while (xQueueReceive(tgQueue, &outMsg, 0) == pdPASS) {
         bot.sendMessage(CHAT_ID, TG_PREFIX + String(outMsg), "");
         vTaskDelay(pdMS_TO_TICKS(100)); // Rate limit buffer
       }
       
-      // Poll for incoming group chat commands
       int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       while (numNewMessages) {
         handleNewMessages(numNewMessages);
         numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(500)); // Snappy 500ms delay
+    vTaskDelay(pdMS_TO_TICKS(500)); 
   }
 }
 
@@ -288,19 +297,21 @@ void setup() {
   isDoorOpen = (digitalRead(REED_PIN) == HIGH);
   lastDoorState = isDoorOpen;
 
-  ledcAttach(BUZZER_PIN, 2400, 8); 
+  // Initialize Buzzer strictly OFF and pulled to GND so MOSFET stays perfectly closed
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  isBuzzerAttached = false; 
 
   preferences.begin("security", false);
   alarmVolume = preferences.getInt("vol_alarm", 255); 
   chimeVolume = preferences.getInt("vol_chime", 128);
 
-  // CRITICAL FIX: Robust, instant Wi-Fi initiation. Clears corrupt states and uses hardware auto-reconnect.
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true); 
   delay(100);
   WiFi.setHostname("DoorAlarm");
   WiFi.setSleep(false); 
-  WiFi.setAutoReconnect(true); // Hardware level auto-reconnect (Zero latency, prevents loops)
+  WiFi.setAutoReconnect(true); 
   WiFi.begin(ssid, password);
 
   secured_client.setInsecure(); 
@@ -326,9 +337,8 @@ void setup() {
 }
 
 void loop() {
-  // Safe Reboot handling execution
   if (shouldReboot) {
-    delay(1000); // Give the Core 0 task just enough time to breathe before execution
+    delay(1000); 
     ESP.restart();
   }
 
@@ -361,14 +371,11 @@ void loop() {
 
       bool isNight = false;
 
-      // Intuitive Boolean logic based on the user toggle
       if (scheduleEndsNextDay) {
-        // Condition matches anytime we are past the start time TODAY, or before the end time TOMORROW
         if (currentMins >= startMins || currentMins < endMins) {
           isNight = true;
         }
       } else {
-        // Condition is standard same-day boundaries (e.g. 08:00 to 17:00)
         if (currentMins >= startMins && currentMins < endMins) {
           isNight = true;
         }
@@ -399,7 +406,6 @@ void loop() {
   if (currentDoorState != lastDoorState) {
     isDoorOpen = currentDoorState;
     
-    // Telegram Trigger
     if (isDoorOpen) enqueueTgMsg(MSG_DOOR_OPEN);
     else enqueueTgMsg(MSG_DOOR_CLOSED);
 
