@@ -74,18 +74,21 @@ int alarmVolume = 255;
 int chimeVolume = 128;
 int chimeTrigger = 0;  
 unsigned long audioTimer = 0;
-int currentBuzzerVol = -1; // CRITICAL: Tracks current volume to prevent hardware spam
+int currentBuzzerVol = -1; // Tracks current volume to prevent hardware spam
 
 // --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
 bool uiBeepActive = false;
 
-// --- LED Constants ---
+// --- LED Constants & State Tracking ---
 #define LED_OFF 0
 #define LED_ON 1
 #define AIRPLANE_BLINK 2
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
+
+int lastDoorLedState = -1;
+int lastArmedLedState = -1;
 
 // --- Minified Material 3 HTML/CSS ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -97,20 +100,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // --- Helpers ---
+
+// CRITICAL FIX: The state barrier stops the 10,000x/sec hardware spam on the LEDs
+// This allows the capacitance to discharge naturally, so the white LED blinks properly without a short.
 void setLedState(int pin, int pattern) {
-  if (pattern == LED_OFF) digitalWrite(pin, LOW);
-  else if (pattern == LED_ON) digitalWrite(pin, HIGH);
-  else if (pattern == AIRPLANE_BLINK) digitalWrite(pin, (millis() % 1050) < 50 ? HIGH : LOW);
-  else if (pattern == RAPID_BLINK) digitalWrite(pin, (millis() / 150) % 2 ? HIGH : LOW);
-  else if (pattern == SLOW_BLINK) digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
+  int desiredState = LOW;
+  
+  if (pattern == LED_OFF) desiredState = LOW;
+  else if (pattern == LED_ON) desiredState = HIGH;
+  else if (pattern == AIRPLANE_BLINK) desiredState = (millis() % 1050) < 50 ? HIGH : LOW;
+  else if (pattern == RAPID_BLINK) desiredState = (millis() / 150) % 2 ? HIGH : LOW;
+  else if (pattern == SLOW_BLINK) desiredState = (millis() / 500) % 2 ? HIGH : LOW;
+
+  // Only execute the digitalWrite if the state actually changes
+  if (pin == DOOR_LED_PIN && desiredState != lastDoorLedState) {
+    digitalWrite(pin, desiredState);
+    lastDoorLedState = desiredState;
+  } else if (pin == ARMED_LED_PIN && desiredState != lastArmedLedState) {
+    digitalWrite(pin, desiredState);
+    lastArmedLedState = desiredState;
+  }
 }
 
-// CRITICAL FIX: The state barrier stops the 10,000x/sec hardware spam that caused the buzzing and broke the LED timings.
+// CRITICAL FIX: When volume is 0, completely detach the PWM driver and hard ground the pin.
+// This permanently stops the low piezo hum.
 void setBuzzerVolume(int vol) {
   if (vol == currentBuzzerVol) return; 
   
   currentBuzzerVol = vol;
-  ledcWrite(BUZZER_PIN, vol);
+  if (vol == 0) {
+    ledcDetach(BUZZER_PIN);        // Kill the PWM signal completely
+    digitalWrite(BUZZER_PIN, LOW); // Force the pin to ground
+  } else {
+    ledcAttach(BUZZER_PIN, 2400, 8); // Re-attach PWM driver
+    ledcWrite(BUZZER_PIN, vol);
+  }
 }
 
 void triggerUiFeedback() {
@@ -287,9 +311,7 @@ void setup() {
   isDoorOpen = (digitalRead(REED_PIN) == HIGH);
   lastDoorState = isDoorOpen;
 
-  // Re-attach normal PWM and command it to 0. 
-  // It will cleanly hold at 0V because it's no longer being spammed.
-  ledcAttach(BUZZER_PIN, 2400, 8); 
+  // The buzzer logic now handles attaching/detaching cleanly.
   setBuzzerVolume(0); 
 
   preferences.begin("security", false);
