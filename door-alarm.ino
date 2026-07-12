@@ -42,7 +42,7 @@ const int scheduleStartHour = 21;
 const int scheduleStartMinute = 30;
 const int scheduleEndHour = 4;
 const int scheduleEndMinute = 0;
-const bool scheduleEndsNextDay = true; // Toggle: true = crosses midnight into tomorrow, false = ends on the same day
+const bool scheduleEndsNextDay = true; 
 
 WebServer server(80);
 Preferences preferences;
@@ -74,7 +74,7 @@ int alarmVolume = 255;
 int chimeVolume = 128;
 int chimeTrigger = 0;  
 unsigned long audioTimer = 0;
-bool isBuzzerAttached = false; // Tracks if PWM is currently controlling the pin
+int currentBuzzerVol = -1; // CRITICAL: Tracks current volume to prevent hardware spam
 
 // --- UI Direct Feedback Beep ---
 unsigned long uiBeepTimer = 0;
@@ -87,7 +87,7 @@ bool uiBeepActive = false;
 #define RAPID_BLINK 3
 #define SLOW_BLINK 4
 
-// --- Minified Material 3 HTML/CSS (Forced Universal Google Sans) ---
+// --- Minified Material 3 HTML/CSS ---
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Door Alarm System Panel</title><link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght=500;700&display=swap" rel="stylesheet"><style>*{font-family:'Google Sans',sans-serif !important} body{background:#f7fbf3;color:#191c18;margin:0;padding:16px;display:flex;justify-content:center} .c{width:100%;max-width:400px;display:flex;flex-direction:column;gap:12px} h2{text-align:center;color:#2b6a41;margin:5px} .box{background:#e1e9dc;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px} .row{display:flex;justify-content:space-between;align-items:center;font-weight:500} .bdg{padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px} .bg{background:#d2e7d6;color:#0f2013} .br{background:#ffdad6;color:#ba1a1a} .bn{background:#ccc;color:#333} .g{display:grid;grid-template-columns:1fr 1fr;gap:10px} button{font-weight:500;font-size:15px;padding:14px;border:none;border-radius:16px;cursor:pointer;transition:transform .1s} button:active{transform:scale(.94)} .b1{background:#2b6a41;color:#fff} .b2{background:transparent;border:1px solid #727970;color:#2b6a41} .b3{background:#d2e7d6;color:#0f2013} .f{grid-column:span 2} input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;background:#727970} input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#2b6a41}</style></head><body>
 <div class="c"><h2>Alarm System Panel</h2><div class="box"><div class="row"><span>Door</span><span id="d" class="bdg bn">--</span></div><div class="row"><span>Alarm</span><span id="a" class="bdg bn">--</span></div><div class="row"><span>Status</span><span id="s" class="bdg bn">--</span></div><div class="row"><span>System Time</span><span id="t" style="font-size:14px;color:#434940">--:--:--</span></div><div class="row"><span>Network</span><span id="w" class="bdg bn">--</span></div></div>
@@ -105,22 +105,12 @@ void setLedState(int pin, int pattern) {
   else if (pattern == SLOW_BLINK) digitalWrite(pin, (millis() / 500) % 2 ? HIGH : LOW);
 }
 
-// CRITICAL FIX: Dynamically detaches PWM when volume is 0 to kill the DAC pin float voltage.
+// CRITICAL FIX: The state barrier stops the 10,000x/sec hardware spam that caused the buzzing and broke the LED timings.
 void setBuzzerVolume(int vol) {
-  if (vol <= 0) {
-    if (isBuzzerAttached) {
-      ledcDetach(BUZZER_PIN);        // Rip control away from the PWM peripheral
-      pinMode(BUZZER_PIN, OUTPUT);   // Re-assert as a standard digital pin
-      digitalWrite(BUZZER_PIN, LOW); // Force hard to GND (0V)
-      isBuzzerAttached = false;
-    }
-  } else {
-    if (!isBuzzerAttached) {
-      ledcAttach(BUZZER_PIN, 2400, 8); // Reattach PWM controller
-      isBuzzerAttached = true;
-    }
-    ledcWrite(BUZZER_PIN, vol);
-  }
+  if (vol == currentBuzzerVol) return; 
+  
+  currentBuzzerVol = vol;
+  ledcWrite(BUZZER_PIN, vol);
 }
 
 void triggerUiFeedback() {
@@ -297,10 +287,10 @@ void setup() {
   isDoorOpen = (digitalRead(REED_PIN) == HIGH);
   lastDoorState = isDoorOpen;
 
-  // Initialize Buzzer strictly OFF and pulled to GND so MOSFET stays perfectly closed
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
-  isBuzzerAttached = false; 
+  // Re-attach normal PWM and command it to 0. 
+  // It will cleanly hold at 0V because it's no longer being spammed.
+  ledcAttach(BUZZER_PIN, 2400, 8); 
+  setBuzzerVolume(0); 
 
   preferences.begin("security", false);
   alarmVolume = preferences.getInt("vol_alarm", 255); 
